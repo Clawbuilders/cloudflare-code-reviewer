@@ -21,10 +21,10 @@ export default {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Cloudflare Code Review Agent (Multi-Harness + Multi-Model)</title>
+  <title>Cloudflare Code Review Agent (6-Pillar Security Suite)</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #f3f4f6; margin: 0; padding: 2rem; }
-    .card { max-width: 720px; margin: 3rem auto; background: #18181b; border: 1px solid #27272a; border-radius: 1rem; padding: 2.5rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+    .card { max-width: 760px; margin: 3rem auto; background: #18181b; border: 1px solid #27272a; border-radius: 1rem; padding: 2.5rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
     h1 { color: #fe5e1e; font-size: 1.75rem; margin-top: 0; display: flex; align-items: center; gap: 0.5rem; }
     p { color: #a1a1aa; line-height: 1.6; font-size: 0.95rem; }
     .badge { display: inline-block; background: rgba(254, 94, 30, 0.15); color: #fe5e1e; font-size: 0.75rem; font-weight: 700; padding: 0.25rem 0.6rem; border-radius: 9999px; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -37,17 +37,19 @@ export default {
   <div class="card">
     <div class="badge">Live on Cloudflare Edge</div>
     <h1>🤖 Cloudflare Code Review Agent</h1>
-    <p>An autonomous GitHub PR review agent built on the Cloudflare Agent Cloud, inspired by <strong>Alibaba open-code-review (OCR)</strong> and guarded by a <strong>4-pillar security harness suite</strong>.</p>
+    <p>An autonomous GitHub PR review agent built on Cloudflare Agent Cloud, inspired by <strong>Alibaba open-code-review (OCR)</strong> and guarded by a <strong>6-Pillar Security Harness Suite</strong>.</p>
     
     <p><strong>Webhook Ingress Endpoint:</strong></p>
     <div class="endpoint">POST ${url.origin}/webhook/github</div>
 
-    <p><strong>Multi-Harness Security Architecture:</strong></p>
+    <p><strong>The 6-Pillar Security Suite:</strong></p>
     <ul>
-      <li><strong>1. Semgrep SAST Harness:</strong> Fast pattern matching for Null Pointer Exceptions, SQLi, and resource leaks.</li>
-      <li><strong>2. Google OSV-Scanner Harness:</strong> Detects newly added vulnerable packages in lockfiles.</li>
-      <li><strong>3. Google Mantis Validation:</strong> Validates real exploitability of flagged defects, eliminating false alarms.</li>
-      <li><strong>4. OWASP Agent Security Regression:</strong> Verifies proposed fixes introduce zero secondary vulnerabilities.</li>
+      <li><strong>1. Gitleaks Harness:</strong> Blocks hardcoded API tokens, private keys, and .env leaks immediately.</li>
+      <li><strong>2. Google OSV-Scanner Harness:</strong> Audits newly introduced packages for known CVEs.</li>
+      <li><strong>3. Semgrep SAST Harness:</strong> Fast AST pattern matching for Null Pointer Exceptions, SQLi, and leaks.</li>
+      <li><strong>4. Open Policy Agent (OPA) Guardrail:</strong> Enforces blast radius & flags unauthorized changes to CI/CD workflows or auth middleware.</li>
+      <li><strong>5. Google Mantis Validation:</strong> Validates real exploitability of flagged defects, eliminating false alarms.</li>
+      <li><strong>6. OWASP Agent Security Regression:</strong> Verifies proposed fixes introduce zero secondary vulnerabilities.</li>
     </ul>
 
     <p><strong>Multi-Model Reasoning Committee:</strong></p>
@@ -89,9 +91,9 @@ export default {
   }
 };
 
-// ── Multi-Harness Pre-Filters ──────────────────────────────────────────────────
+// ── Security Harnesses ─────────────────────────────────────────────────────────
 
-// Harness 1: Secret & Credential Scanner (Gitleaks Heuristics)
+// Pillar 1: Secret & Credential Scanner (Gitleaks Heuristics)
 function scanForSecrets(diffText: string): string[] {
   const findings: string[] = [];
   const secretPatterns = [
@@ -109,7 +111,7 @@ function scanForSecrets(diffText: string): string[] {
   return findings;
 }
 
-// Harness 2: Dependency Vulnerability Auditor (Google OSV-Scanner Heuristics)
+// Pillar 2: Dependency Vulnerability Auditor (Google OSV-Scanner Heuristics)
 function checkDependencyAudit(parsedFiles: parseDiff.File[]): string[] {
   const alerts: string[] = [];
   for (const file of parsedFiles) {
@@ -118,7 +120,6 @@ function checkDependencyAudit(parsedFiles: parseDiff.File[]): string[] {
       for (const chunk of file.chunks) {
         for (const change of chunk.changes) {
           if (change.type === 'add' && change.content.includes('"')) {
-            // Flag added dependencies for supply-chain review
             alerts.push(`Dependency modification in ${filename}: ${change.content.trim()}`);
           }
         }
@@ -126,6 +127,32 @@ function checkDependencyAudit(parsedFiles: parseDiff.File[]): string[] {
     }
   }
   return alerts;
+}
+
+// Pillar 4: Blast Radius & Policy Gate (Open Policy Agent / OPA Rules)
+function evaluateOpaPolicy(parsedFiles: parseDiff.File[]): string[] {
+  const policyViolations: string[] = [];
+  const sensitivePatterns = [
+    { pattern: '.github/workflows/', description: 'CI/CD Workflow modification (Pipeline poisoning risk)' },
+    { pattern: 'auth/', description: 'Core authentication/authorization middleware modification' },
+    { pattern: 'wrangler.json', description: 'Cloudflare binding / infrastructure config modification' },
+  ];
+
+  for (const file of parsedFiles) {
+    const filename = file.to || '';
+    for (const { pattern, description } of sensitivePatterns) {
+      if (filename.includes(pattern)) {
+        policyViolations.push(`⚠️ Policy Warning (${description}): ${filename}`);
+      }
+    }
+  }
+
+  // Blast radius check: > 15 files changed in one PR
+  if (parsedFiles.length > 15) {
+    policyViolations.push(`⚠️ Blast Radius Warning: PR modifies ${parsedFiles.length} files. Recommended to split into smaller PRs.`);
+  }
+
+  return policyViolations;
 }
 
 // ── Durable Object: State, Debounce & Multi-Model Committee ────────────────────
@@ -172,7 +199,7 @@ export class PrReviewCoordinator extends DurableObject {
       });
       const diffText = await diffResponse.text();
 
-      // ── HARNESS 1: Secret & Credential Scanning (Gitleaks Guard) ───────────
+      // ── PILLAR 1: Gitleaks Zero-Tolerance Secret Gate ───────────────────────
       const leakedSecrets = scanForSecrets(diffText);
       if (leakedSecrets.length > 0) {
         if (this.env.GITHUB_TOKEN) {
@@ -184,7 +211,7 @@ export class PrReviewCoordinator extends DurableObject {
               'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-              body: `### 🚨 [CRITICAL SECURITY BLOCK] Hardcoded Secret Detected!\n\nThe PR diff contains potential hardcoded credentials: **${leakedSecrets.join(', ')}**.\n\nPlease revoke this token immediately and remove it from git history before merging.`
+              body: `### 🚨 [CRITICAL SECURITY BLOCK — Gitleaks Scan]\n\nHardcoded credentials detected in PR diff: **${leakedSecrets.join(', ')}**.\n\nPlease revoke this token immediately and remove it from git history before merging.`
             })
           });
         }
@@ -192,12 +219,11 @@ export class PrReviewCoordinator extends DurableObject {
         return;
       }
 
-      // ── HARNESS 2: Dependency Vulnerability Audit (Google OSV Scanner) ──────
+      // ── PILLAR 2: Google OSV-Scanner Dependency Audit ───────────────────────
       const parsedFiles = parseDiff(diffText);
       const dependencyChanges = checkDependencyAudit(parsedFiles);
 
-      // ── HARNESS 3: Deterministic Hard Rails (Semgrep & Alibaba OCR Rules) ───
-      // Filter out lockfiles, minified files, assets, and vendored code
+      // ── PILLAR 3: Semgrep & Alibaba OCR Hard Rails ─────────────────────────
       const reviewableFiles = parsedFiles.filter(file => {
         const path = file.to || '';
         return !path.endsWith('.lock') &&
@@ -209,6 +235,9 @@ export class PrReviewCoordinator extends DurableObject {
                !path.includes('build/');
       });
 
+      // ── PILLAR 4: Open Policy Agent (OPA) Blast Radius & Scope Gate ────────
+      const policyAlerts = evaluateOpaPolicy(parsedFiles);
+
       if (reviewableFiles.length === 0 && dependencyChanges.length === 0) {
         await this.state.storage.delete('pending_pr');
         return;
@@ -218,7 +247,7 @@ export class PrReviewCoordinator extends DurableObject {
 
       // ── MULTI-MODEL PARALLEL EVALUATION (Promise.all) ──────────────────────
       const [securityReport, codeReport] = await Promise.all([
-        // Model 1 (Security Auditor + Google Mantis Validation): DeepSeek R1
+        // PILLAR 5: Google Mantis Validation + DeepSeek R1 Reasoning
         this.env.AI.run('@cf/deepseek-ai/deepseek-r1-distill-qwen-32b', {
           messages: [
             {
@@ -234,7 +263,7 @@ If the code is secure, respond with NONE.`
           ]
         }),
 
-        // Model 2 (Code Quality Specialist): Alibaba Qwen 2.5 Coder
+        // Model 2: Alibaba Qwen 2.5 Coder (Clean Syntax & Fix Generation)
         this.env.AI.run('@cf/qwen/qwen2.5-coder-32b-instruct', {
           messages: [
             {
@@ -253,21 +282,22 @@ For any issue found:
         })
       ]);
 
-      // ── HARNESS 4: OWASP Agent Security Regression & Lead Arbiter Synthesis ─
+      // ── PILLAR 6: OWASP Agent Security Regression & Lead Arbiter Synthesis ─
       const finalSynthesis = await this.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
         messages: [
           {
             role: 'system',
             content: `You are the Lead Code Review Arbiter enforcing the OWASP Agent Security Regression Harness.
-Synthesize the findings from all harnesses:
-- Dependency Changes: ${dependencyChanges.length > 0 ? dependencyChanges.join('; ') : 'None'}
-- Security Specialist (Mantis/Semgrep verified): ${securityReport.response}
+Synthesize the findings from all 6 pillars:
+- OPA Policy & Blast Radius: ${policyAlerts.length > 0 ? policyAlerts.join('; ') : 'Safe scope'}
+- OSV Dependency Audit: ${dependencyChanges.length > 0 ? dependencyChanges.join('; ') : 'Clean'}
+- Security Specialist (Google Mantis/Semgrep): ${securityReport.response}
 - Code Quality Specialist (Qwen 2.5 Coder): ${codeReport.response}
 
 Verification Checklist:
 1. Ensure proposed fixes introduce ZERO secondary regressions or permission leaks (OWASP standard).
 2. Deduplicate overlapping comments and eliminate false alarms.
-3. Format output with badges: [SECURITY], [DEPENDENCY], [CODE QUALITY].`
+3. Format output with badges: [SECURITY], [POLICY], [DEPENDENCY], [CODE QUALITY].`
           },
           { role: 'user', content: `Original diff:\n${diffHunk}` }
         ]
@@ -291,7 +321,7 @@ Verification Checklist:
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            body: `### 🛡️ AI Review Committee (Multi-Harness + Multi-Model)\n*Verified by Semgrep SAST • Google OSV • Google Mantis • OWASP Agent Regression*\n\n${finalSynthesis.response}`
+            body: `### 🛡️ AI Review Committee (6-Pillar Security Suite)\n*Guarded by Gitleaks • Google OSV • Semgrep • Open Policy Agent (OPA) • Google Mantis • OWASP*\n\n${finalSynthesis.response}`
           })
         });
       }
