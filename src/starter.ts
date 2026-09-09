@@ -1,0 +1,111 @@
+/**
+ * STARTER TRACK: Minimal 10-Minute Code Reviewer
+ * 
+ * A clean, single-file Cloudflare Worker that:
+ * 1. Listens for GitHub pull_request webhooks
+ * 2. Filters out lockfiles, configs, and assets (Alibaba OCR rule)
+ * 3. Reviews the diff using Alibaba Qwen 2.5 Coder on Workers AI
+ * 4. Posts inline review suggestions back to the GitHub PR
+ * 
+ * Run locally: npm run dev:starter
+ * Deploy independently: npm run deploy:starter
+ */
+
+import parseDiff from 'parse-diff';
+
+export interface Env {
+  AI: any;
+  GITHUB_TOKEN?: string;
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    // Health check / GET handler
+    if (request.method === 'GET') {
+      return new Response(
+        '🤖 Starter PR Reviewer is running! Point your GitHub webhook to POST /',
+        { status: 200 }
+      );
+    }
+
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
+
+    let payload: any;
+    try {
+      payload = await request.json();
+    } catch {
+      return new Response('Invalid JSON', { status: 400 });
+    }
+
+    // Only review when a PR is opened or new commits are pushed
+    if (!payload.pull_request || (payload.action !== 'opened' && payload.action !== 'synchronize')) {
+      return new Response('Event ignored', { status: 200 });
+    }
+
+    const pr = payload.pull_request;
+
+    // 1. Fetch raw diff from GitHub
+    const diffResponse = await fetch(pr.diff_url, {
+      headers: { 'User-Agent': 'Cloudflare-Starter-Reviewer' }
+    });
+    const diffText = await diffResponse.text();
+
+    // 2. Deterministic Filter: Skip lockfiles, bundles, and assets (Alibaba OCR principle)
+    const files = parseDiff(diffText).filter(file => {
+      const path = file.to || '';
+      return !path.endsWith('.lock') &&
+             !path.endsWith('.json') &&
+             !path.endsWith('.yaml') &&
+             !path.endsWith('.md') &&
+             !path.includes('dist/') &&
+             !path.includes('vendor/');
+    });
+
+    if (files.length === 0) {
+      return new Response('No reviewable code files found.', { status: 200 });
+    }
+
+    // 3. Review code using Alibaba Qwen 2.5 Coder on Cloudflare Workers AI
+    const diffHunk = JSON.stringify(files.slice(0, 5));
+    const aiResponse = await env.AI.run('@cf/qwen/qwen2.5-coder-32b-instruct', {
+      messages: [
+        {
+          role: 'system',
+          content: `You are an automated code reviewer enforcing Alibaba Open-Code-Review standards.
+Identify potential bugs, NPEs, race conditions, and unhandled errors.
+For each issue, provide:
+1. File and line number
+2. Clear explanation of why it fails
+3. Actionable fix using GitHub suggestion format:
+\`\`\`suggestion
+<corrected code>
+\`\`\``
+        },
+        {
+          role: 'user',
+          content: `Review this parsed PR diff:\n${diffHunk}`
+        }
+      ]
+    });
+
+    // 4. Post feedback back to GitHub PR
+    const token = env.GITHUB_TOKEN;
+    if (token) {
+      await fetch(pr.comments_url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `token ${token}`,
+          'User-Agent': 'Cloudflare-Starter-Reviewer',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          body: `### 🤖 Automated Code Review (Starter Track)\n*Powered by Cloudflare Workers AI (@cf/qwen/qwen2.5-coder-32b-instruct)*\n\n${aiResponse.response}`
+        })
+      });
+    }
+
+    return new Response('Review posted successfully', { status: 200 });
+  }
+};

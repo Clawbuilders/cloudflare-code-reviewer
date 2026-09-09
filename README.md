@@ -8,11 +8,29 @@ Built for [ClawBuilders](https://clawbuilder.club) S1:E5 — [Deploy AI Agents w
 
 ## ⚡ One-Click Deploy to Cloudflare
 
-Deploy this entire agent live to your own Cloudflare account in under 60 seconds with zero local setup:
+Deploy the complete multi-model agent live to your own Cloudflare account in under 60 seconds with zero local setup:
 
 <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/Clawbuilders/cloudflare-code-reviewer">
   <img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" height="38"/>
 </a>
+
+---
+
+## 🧭 Two Tracks in One Repo
+
+This repository contains both workshop tracks so builders can see the code evolve from a simple 50-line worker to an enterprise multi-model committee:
+
+### 1. 🚀 Starter Track (`src/starter.ts`)
+*   **Concept**: Deploy your first automated PR reviewer in 10 minutes.
+*   **Architecture**: Single stateless Cloudflare Worker + Workers AI (Alibaba Qwen 2.5 Coder).
+*   **Run Locally**: `npm run dev:starter`
+*   **Deploy**: `npm run deploy:starter`
+
+### 2. ⚡ Advanced Track (`src/index.ts` — Default Deploy)
+*   **Concept**: Full Alibaba OCR architecture with state, debouncing, and multi-model consensus.
+*   **Architecture**: Ingress Worker + SQLite Durable Object (15s push debounce) + Parallel Committee (`DeepSeek-R1` + `Alibaba Qwen 2.5 Coder` + `Llama 3.3 70B` Arbiter).
+*   **Run Locally**: `npm run dev`
+*   **Deploy**: `npm run deploy` (or click the **Deploy to Cloudflare** button above!)
 
 ---
 
@@ -69,7 +87,11 @@ npm install
 
 ### 2. Run Locally
 ```bash
+# To run the Advanced Track (Multi-Model + Durable Objects):
 npm run dev
+
+# Or to run the Starter Track (Single Worker):
+npm run dev:starter
 ```
 
 ### 3. Deploy to Cloudflare
