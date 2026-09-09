@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-code-reviewer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "ai": {
+    "binding": "AI"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PR_COORDINATOR",
+        "class_name": "PrReviewCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PrReviewCoordinator"]
+    }
+  ]
+}
