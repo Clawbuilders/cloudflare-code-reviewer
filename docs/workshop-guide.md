@@ -2,7 +2,7 @@
 
 > **Event:** ClawBuilders S1:E5 — Deploy AI Agents with Cloudflare  
 > **Format:** 3-Hour Hands-on Builder Meetup (Build • Deploy • Demo)  
-> **Reference Architecture:** [alibaba/open-code-review](https://github.com/alibaba/open-code-review) + Cloudflare Agent Cloud  
+> **Reference Architecture:** [alibaba/open-code-review](https://github.com/alibaba/open-code-review) + Cloudflare Workers, Durable Objects & Workers AI  
 
 ---
 
@@ -17,7 +17,7 @@ Rather than building a standard chatbot, attendees build an edge-native develope
 2. **State & Debounce**: SQLite-backed Durable Objects coordinate PR events, debouncing rapid commit pushes and preserving review conversation history.
 3. **Multi-Model Committee**: Runs multiple specialized AI models concurrently (Security specialist + Code Quality specialist + Arbiter) using edge parallelization (`Promise.all()`).
 4. **AI Gateway Proxy**: Provides unified model endpoints, 24-hour diff caching (0 token cost on repeated hunks), and automatic provider failover.
-5. **Interactive MCP**: Exposes a Model Context Protocol endpoint so developers can question or challenge the reviewer directly inside local terminals via **Claude Code**, **Cursor**, or **Hermes Agent**.
+5. **Interactive MCP** *(stretch goal, not part of the guided build — see §7 Track 2)*: Exposes a Model Context Protocol endpoint so developers can question or challenge the reviewer directly inside local terminals via **Claude Code**, **Cursor**, or **Hermes Agent**.
 
 ---
 
@@ -63,18 +63,22 @@ Alibaba divides code review into two distinct layers:
 
 ---
 
-## 3. The 6-Pillar Security Harness Suite (Each with its Own Specialty)
+## 3. The 7-Pillar Security Harness Suite (Each with its Own Specialty)
 
-Just as the brain employs multiple specialized models, the agent evaluates pull requests through a **6-Pillar Defense-in-Depth Suite**—where every harness is an industry-recognized open-source project backed by major foundations (CNCF, Google, OWASP):
+A Cloudflare Worker is a V8 isolate: it **cannot** spawn native binaries, so `gitleaks`, `semgrep`, and `opa` cannot literally run inside it without a paid [Cloudflare Sandbox](https://developers.cloudflare.com/sandbox/) container. Rather than pretend otherwise, the reference implementation (`src/index.ts` in the [reference repo](https://github.com/Clawbuilders/cloudflare-code-reviewer)) is explicit about which pillars are genuinely live and which are honest heuristics:
 
-| # | Security Harness & Repository | Stars / Pedigree | Specialty & Role in Review | Execution Layer |
+- **REAL** — calls a live, free, public HTTP API. No binary required; this is exactly what a Worker can legitimately do on the free tier.
+- **HEURISTIC** — a hand-rolled JS re-implementation of the named project's rule *ideas* (regex/path-matching), not the actual tool. Say this out loud when presenting — don't tell attendees it's literally running Semgrep or OPA, since it isn't.
+
+| # | Security Harness & Repository | Kind | Specialty & Role in Review | Execution Layer |
 |---|---|---|---|---|
-| **1** | **[gitleaks/gitleaks](https://github.com/gitleaks/gitleaks)** | 20k+ ★ | **Zero-Tolerance Secret & Token Scanning**: Instant regex & entropy scanning on diffs. Halts and issues a critical block if hardcoded API keys, tokens, or `.env` credentials are detected. | Pre-LLM Edge Gate (Worker native) |
-| **2** | **[google/osv-scanner](https://github.com/google/osv-scanner)** | 6k+ ★ (Google) | **Dependency & Supply Chain Auditing**: Audits newly added packages in `package.json`, `pnpm-lock.yaml`, and `Cargo.lock` against Google's Open Source Vulnerabilities database for known CVEs. | Pre-LLM Lockfile Scanner |
-| **3** | **[semgrep/semgrep](https://github.com/semgrep/semgrep)** | 11k+ ★ | **Deterministic SAST Pattern Matching**: Fast AST-level rule matching for OWASP Top 10 vulnerabilities, Null Pointer Exceptions (NPE), SQL injection, and memory/socket leaks. | Pre-LLM Filter (Sandbox / rules) |
-| **4** | **[open-policy-agent/opa](https://github.com/open-policy-agent/opa)** | 12k+ ★ (CNCF) | **Blast Radius & PR Policy Gate**: Enforces policy-as-code. Flags PRs modifying protected CI/CD workflows (`.github/workflows/`), core auth middleware, or exceeding safe change radius. | Pre-LLM Policy Gate |
-| **5** | **[google/mantis](https://github.com/google/mantis)** | Google Toolkit | **Vulnerability Validation & Reproduction**: Google’s security review toolkit for AI agents. DeepSeek-R1 uses Mantis rules to verify whether a flagged flaw is truly reachable and exploitable, eliminating false alarms. | Mid-Pipeline Validation Layer |
-| **6** | **[OWASP/Agent-Security-Regression-Harness](https://github.com/OWASP/Agent-Security-Regression-Harness)** | OWASP Standard | **Agent Safety & Regression Gate**: Enforced by Lead Arbiter (Llama 3.3 70B) to verify that the proposed replacement code does not introduce secondary vulnerabilities, permission bypasses, or context leaks. | Post-Generation Verification Layer |
+| **1** | **[gitleaks/gitleaks](https://github.com/gitleaks/gitleaks)**-pattern scan (29k+ ★) | HEURISTIC | Regex/entropy rules modeled on gitleaks' public default ruleset. Halts and issues a critical block if hardcoded API keys, tokens, or private key blocks are detected. | Pre-LLM Edge Gate (Worker native, `scanForSecrets`) |
+| **2** | **[osv.dev](https://osv.dev)** vulnerability lookup (Google) | **REAL** | New `package.json` dependencies are batch-queried live via `POST api.osv.dev/v1/querybatch` — real CVE/GHSA IDs come back, not a guess. Scoped to `package.json`; lockfiles need a real parser to do honestly, so they're out of scope here. | Pre-LLM Dependency Check (`checkOsvVulnerabilities`) |
+| **3** | Hard-Rails file filter (Alibaba OCR-style) | HEURISTIC | Strips lockfiles, bundles, and vendor code before spending LLM tokens. Not a Semgrep integration — SAST-style reasoning happens in the LLM pass (Pillar 5). | Pre-LLM Filter |
+| **4** | **[open-policy-agent/opa](https://github.com/open-policy-agent/opa)**-inspired policy gate (CNCF) | HEURISTIC | Flags PRs touching CI/CD workflows (`.github/workflows/`), auth code, or infra config, and PRs over a blast-radius file-count threshold. Real OPA is a legitimate stretch goal: compile a Rego policy to WASM (`opa build -t wasm`) and evaluate it with [`@open-policy-agent/opa-wasm`](https://github.com/open-policy-agent/npm-opa-wasm) — not built here, since it needs a build step this workshop doesn't have time for. | Pre-LLM Policy Gate (`evaluateOpaPolicy`) |
+| **5** | **[google/mantis](https://github.com/google/mantis)**-style reachability check | **REAL context** | Pulls the *full file* (not just the diff hunk) for up to 2 changed files via the GitHub Contents API at the PR's head commit, and hands it to DeepSeek-R1 so it can judge whether a flagged issue is actually reachable — not just pattern-matched in isolation. | Mid-Pipeline Context Fetch (`fetchFullFileContext`) |
+| **6** | **[OWASP/Agent-Security-Regression-Harness](https://github.com/OWASP/Agent-Security-Regression-Harness)**-style regression gate | HEURISTIC | Lead Arbiter (Llama 3.3 70B) is instructed to verify the proposed fix introduces zero secondary vulnerabilities before posting. The real OWASP harness is an external, executable regression suite meant to run in CI against a deployed agent endpoint — a good companion GitHub Action, not something a Worker runs on itself. | Post-Generation Verification Layer |
+| **7** | **[deps.dev](https://deps.dev)** OpenSSF Scorecard check (Google) | **REAL** | New dependencies are resolved to their source repo and checked live against the OpenSSF Scorecard (maintenance activity, code review practices, branch protection) via deps.dev's public API — bounded to 2 dependencies per run to keep the two-hop lookup fast. | Post-Dependency Supply-Chain Check (`checkSupplyChainScorecard`) |
 
 ---
 
@@ -95,13 +99,15 @@ The entire workshop runs on Cloudflare's **100% Free Tier** with zero credit car
 
 ## 5. Live Edge Models in Workers AI Catalog
 
-Queried directly from Cloudflare's catalog (`wrangler ai models list`):
+Queried directly from Cloudflare's catalog (`wrangler ai models`):
 
-*   **`@cf/qwen/qwen2.5-coder-32b-instruct`**: Alibaba's official code model, trained specifically for code generation, diff comprehension, and syntax corrections.
-*   **`@cf/deepseek-ai/deepseek-r1-distill-qwen-32b`**: Reasoning model built for deep logic analysis, catching edge cases, memory leaks, and concurrency bugs.
-*   **`@cf/meta/llama-3.3-70b-instruct-fp8-fast`**: High-throughput 70B parameter model ideal for multi-agent synthesis and review arbitration.
-*   **`@cf/meta/llama-4-scout-17b-16e-instruct`**: Meta's 17B parameter MoE model (16 experts).
-*   **`@cf/moonshotai/kimi-k2.7-code`**: Long-context code model (262K context) for reviewing massive multi-file pull requests.
+*   **`@cf/qwen/qwen2.5-coder-32b-instruct`**: Alibaba's official code model, trained specifically for code generation, diff comprehension, and syntax corrections. **Free tier.**
+*   **`@cf/deepseek-ai/deepseek-r1-distill-qwen-32b`**: Reasoning model built for deep logic analysis, catching edge cases, memory leaks, and concurrency bugs. **Free tier.**
+*   **`@cf/meta/llama-3.3-70b-instruct-fp8-fast`**: High-throughput 70B parameter model ideal for multi-agent synthesis and review arbitration. **Free tier.**
+*   **`@cf/meta/llama-4-scout-17b-16e-instruct`**: Meta's 17B parameter MoE model (16 experts). **Free tier.**
+*   **`@cf/moonshotai/kimi-k2.7-code`**: Long-context code model (262K context) for reviewing massive multi-file pull requests. **⚠️ Requires the Workers Paid plan or prepaid AI Gateway credits — not accessible on the free allowance.** Mention this as a "if your org has a paid Cloudflare account" stretch goal only; don't put it in front of attendees expecting a zero-cost demo.
+
+All four free-tier models above draw from the same **10,000 Neurons/day** free allowance (§4) — plenty for a live demo evening, but mention this cap explicitly so no one is surprised if Neurons run out during the last few demos.
 
 ---
 
@@ -162,23 +168,25 @@ Queried directly from Cloudflare's catalog (`wrangler ai models list`):
                       │      Regression Check       │
                       │  (No secondary vulns/leaks) │
                       └──────────────┬──────────────┘
-                                     │ 7. Proxied via AI Gateway
-                                     ▼
-                      ┌─────────────────────────────┐
-                      │    Cloudflare AI Gateway    │
-                      │  - 24h Diff Cache           │
-                      │  - Observability & Metrics  │
-                      └─────────────────────────────┘
-              ┌─────────────────────────────┐
-              │     Local IDE (MCP)         │
-              │ Claude Code / Cursor /      │
-              │ Hermes Agent                │
-              └─────────────────────────────┘
+                                     │ 7. Post to GitHub (loops back up to
+                                     ▼  step "8." on the GitHub Repository box)
+
+  Note: every env.AI.run() call above (steps 4-6, not just the last one) is
+  actually proxied through Cloudflare AI Gateway — that's what turns on the
+  24h diff cache, fallback routing, and observability, and it has to be
+  passed as the 3rd argument on each individual call (see §7 Track 2 Step 2).
+
+              ┌─────────────────────────────────────┐
+              │   Local IDE (MCP) — STRETCH GOAL     │
+              │   Claude Code / Cursor / Hermes      │
+              │   Not built in the guided steps —    │
+              │   see §7 Track 2 for pointers.        │
+              └───────────────────────────────────────┘
 ```
 
 ---
 
-## 6. Full Workshop Plan & Tracks
+## 7. Full Workshop Plan & Tracks
 
 The workshop is split into two tracks:
 *   **Starter Track**: Zero-to-hero in 10 minutes. 100% free, single worker, deployed live to `*.workers.dev`.
@@ -203,7 +211,7 @@ npm install parse-diff
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "cf-pr-reviewer",
   "main": "src/index.ts",
-  "compatibility_date": "2026-09-01",
+  "compatibility_date": "2026-09-09",
   "ai": {
     "binding": "AI"
   }
@@ -299,20 +307,26 @@ Copy the generated `*.workers.dev` URL and paste it into GitHub Repo Settings �
 ### Track 2: Advanced Track ("Multi-Model Committee & Stateful OCR")
 
 **Goal:** Implement the full enterprise architecture:
-1. **Durable Objects (`state.storage.sql`)**: 15s push debounce & review history.
+1. **Durable Objects (`ctx.storage.sql`)**: 15s push debounce & review history.
 2. **Multi-Model Committee**: DeepSeek R1 + Qwen 2.5 Coder evaluated concurrently via `Promise.all()`, synthesized by Llama 3.3 70B.
 3. **AI Gateway**: 24h diff caching and provider failover.
-4. **Model Context Protocol (MCP)**: Interactive developer chat via terminal agents.
+4. **Model Context Protocol (MCP)** *(stretch goal — not built in Step 2 below)*: exposing a `/mcp` endpoint so attendees can question the reviewer from Claude Code/Cursor is a great "if you finish early" extension, but it isn't part of the guided build. Don't schedule it into the 105-minute build block as if it were — point fast finishers at the [Cloudflare Agents SDK MCP docs](https://developers.cloudflare.com/agents/model-context-protocol/) instead.
 
 #### Step 1: Configure Durable Objects & AI Gateway (`wrangler.json`)
+
+First create the gateway once in the dashboard (**AI** → **AI Gateway** → **Create Gateway**), then reference its name as a var:
+
 ```json
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "cf-pr-reviewer-advanced",
   "main": "src/index.ts",
-  "compatibility_date": "2026-09-01",
+  "compatibility_date": "2026-09-09",
   "ai": {
     "binding": "AI"
+  },
+  "vars": {
+    "AI_GATEWAY_NAME": "cf-pr-reviewer"
   },
   "durable_objects": {
     "bindings": [
@@ -334,8 +348,7 @@ export interface Env {
   AI: any;
   PR_COORDINATOR: DurableObjectNamespace;
   GITHUB_TOKEN: string;
-  CF_ACCOUNT_ID: string;
-  AI_GATEWAY_NAME: string;
+  AI_GATEWAY_NAME: string; // create this once in the dashboard: AI Gateway → Create Gateway
 }
 
 // ── Ingress Worker ────────────────────────────────────────────────────────────
@@ -361,21 +374,24 @@ export default {
 };
 
 // ── Durable Object: State, Debounce & Multi-Model Execution ────────────────────
-export class PrReviewCoordinator extends DurableObject {
-  private state: DurableObjectState;
-
-  constructor(state: DurableObjectState, env: Env) {
-    super(state, env);
-    this.state = state;
-    // Initialize SQLite storage for conversation & review history
-    this.state.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS reviews (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        commit_sha TEXT,
-        summary TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+// Note: current Cloudflare guidance is to read state off `this.ctx` (inherited
+// from the DurableObject base class) rather than re-assigning it to a private
+// field — `this.ctx` is already there for you once you call `super(ctx, env)`.
+export class PrReviewCoordinator extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // Schema setup only — wrap in blockConcurrencyWhile so no request is
+    // served against a table that hasn't been created yet.
+    ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS reviews (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          commit_sha TEXT,
+          summary TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -383,15 +399,15 @@ export class PrReviewCoordinator extends DurableObject {
     const pr = payload.pull_request;
 
     // 1. Debounce rapid pushes: Reset alarm for 15 seconds
-    await this.state.storage.setAlarm(Date.now() + 15000);
-    await this.state.storage.put('pending_pr', pr);
+    await this.ctx.storage.setAlarm(Date.now() + 15000);
+    await this.ctx.storage.put('pending_pr', pr);
 
     return new Response(JSON.stringify({ status: 'queued', debounce: 15 }), { status: 200 });
   }
 
   // Executes automatically after 15 seconds of silence (no new pushes)
   async alarm() {
-    const pr: any = await this.state.storage.get('pending_pr');
+    const pr: any = await this.ctx.storage.get('pending_pr');
     if (!pr) return;
 
     // 1. Fetch & Parse Diff
@@ -404,6 +420,13 @@ export class PrReviewCoordinator extends DurableObject {
     );
     const diffPayload = JSON.stringify(files.slice(0, 5));
 
+    // Every AI Gateway option below is what actually turns on the 24h cache,
+    // analytics, and fallback routing claimed in §1/§4 — without the third
+    // `{ gateway: { id } }` argument, env.AI.run() calls Workers AI *directly*
+    // and none of that applies. This is the one part of the pipeline that's
+    // easy to build and forget to wire up, so don't skip it live.
+    const gatewayOpts = { gateway: { id: this.env.AI_GATEWAY_NAME, cacheTtl: 86400 } };
+
     // 2. Parallel Multi-Model Committee (Zero added latency)
     const [securityCheck, codeCheck] = await Promise.all([
       // Specialist 1: DeepSeek R1 for deep vulnerability and race condition analysis
@@ -412,7 +435,7 @@ export class PrReviewCoordinator extends DurableObject {
           { role: 'system', content: 'You are an adversarial security auditor. Flag only high-severity logic bugs, memory leaks, NPEs, or race conditions.' },
           { role: 'user', content: diffPayload }
         ]
-      }),
+      }, gatewayOpts),
 
       // Specialist 2: Alibaba Qwen 2.5 Coder for code correctness & replacement syntax
       this.env.AI.run('@cf/qwen/qwen2.5-coder-32b-instruct', {
@@ -420,10 +443,10 @@ export class PrReviewCoordinator extends DurableObject {
           { role: 'system', content: 'You are a staff software engineer. Suggest clean, idiomatic improvements with ```suggestion blocks.' },
           { role: 'user', content: diffPayload }
         ]
-      })
+      }, gatewayOpts)
     ]);
 
-    // 3. Lead Arbiter: Synthesize reports & remove false alarms via AI Gateway
+    // 3. Lead Arbiter: Synthesize reports & remove false alarms, proxied via AI Gateway
     const finalReview = await this.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
       messages: [
         {
@@ -442,10 +465,10 @@ Task:
         },
         { role: 'user', content: `Original Diff:\n${diffPayload}` }
       ]
-    });
+    }, gatewayOpts);
 
     // 4. Save review in SQLite memory
-    this.state.storage.sql.exec(
+    this.ctx.storage.sql.exec(
       'INSERT INTO reviews (commit_sha, summary) VALUES (?, ?)',
       pr.head.sha,
       finalReview.response
@@ -464,14 +487,18 @@ Task:
       })
     });
 
-    await this.state.storage.delete('pending_pr');
+    await this.ctx.storage.delete('pending_pr');
   }
 }
 ```
 
+> **This is the teaching version — the deployed reference repo goes further.** `src/index.ts` in [Clawbuilders/cloudflare-code-reviewer](https://github.com/Clawbuilders/cloudflare-code-reviewer) additionally implements the two **REAL** pillars from §3 as working code, not prompts: a live `POST api.osv.dev/v1/querybatch` lookup for new `package.json` dependencies (Pillar 2), a live deps.dev OpenSSF Scorecard check (Pillar 7), and a GitHub Contents API fetch that hands the security model full file context instead of just the diff hunk (Pillar 5, Mantis-style reachability). All three are pure `fetch()` calls — no new dependencies, nothing that needs a native binary. If you have time in the Advanced Track, walk attendees through `checkOsvVulnerabilities()` and `checkSupplyChainScorecard()` in the repo directly; they're short, and seeing the pipeline return a *real* CVE ID lands better than a simulated one.
+
+> **Caveat — "one-click suggestion blocks" isn't literal here.** Both tracks post the review as a single **issue comment** via `pr.comments_url`. That's the right call for a 3-hour workshop (one POST, no diff-position math), and the ` ```suggestion ` fence still renders as a readable diff block in the comment body — but GitHub's actual one-click "Add suggestion to batch" button only appears on comments created through the **Pull Request Review Comments API** (`POST /repos/{owner}/{repo}/pulls/{pull_number}/comments`), anchored to a specific `commit_id` + `path` + `line`. Say this explicitly when you demo it, so nobody spends the demo slot hunting for a button that isn't there. Wiring up real inline suggestions is a good stretch-goal callout for advanced-track attendees who finish early.
+
 ---
 
-## 7. Facilitator Guide & Workshop Operations
+## 8. Facilitator Guide & Workshop Operations
 
 ### Schedule Breakdown (180 Minutes)
 *   **0:00 – 0:30 (Check-in & Intros)**: Attendees get settled, grab food, and confirm prerequisites (`wrangler`, `Node.js 18+`, GitHub accounts).
@@ -488,4 +515,4 @@ Task:
 ### Common Troubleshooting Points
 1. **GitHub Webhook Times Out**: GitHub requires an HTTP response within 10 seconds. The Worker acknowledges with `200 OK` immediately upon ingress and delegates work to the Durable Object alarm asynchronously.
 2. **Missing SQLite Migration**: Ensure `wrangler.json` includes `new_sqlite_classes: ["PrReviewCoordinator"]` under migrations.
-3. **GitHub API Permissions**: Personal Access Tokens (PAT) must have `repo` or `pull_requests:write` scopes enabled.
+3. **GitHub API Permissions**: a classic Personal Access Token needs the `repo` scope; a fine-grained PAT needs **Pull requests: Read and write** (and **Contents: Read** to fetch `diff_url`) on the target repo.

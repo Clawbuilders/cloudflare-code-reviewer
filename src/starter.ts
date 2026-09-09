@@ -16,6 +16,7 @@ import parseDiff from 'parse-diff';
 export interface Env {
   AI: any;
   GITHUB_TOKEN?: string;
+  AI_GATEWAY_NAME?: string;
 }
 
 export default {
@@ -68,7 +69,12 @@ export default {
     }
 
     // 3. Review code using Alibaba Qwen 2.5 Coder on Cloudflare Workers AI
+    // Proxied through AI Gateway when AI_GATEWAY_NAME is set (dashboard: AI →
+    // AI Gateway → Create Gateway) — turns on 24h caching for free.
     const diffHunk = JSON.stringify(files.slice(0, 5));
+    const gatewayOpts = env.AI_GATEWAY_NAME
+      ? { gateway: { id: env.AI_GATEWAY_NAME, cacheTtl: 86400 } }
+      : undefined;
     const aiResponse = await env.AI.run('@cf/qwen/qwen2.5-coder-32b-instruct', {
       messages: [
         {
@@ -88,7 +94,7 @@ For each issue, provide:
           content: `Review this parsed PR diff:\n${diffHunk}`
         }
       ]
-    });
+    }, gatewayOpts);
 
     // 4. Post feedback back to GitHub PR
     const token = env.GITHUB_TOKEN;
