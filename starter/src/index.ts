@@ -12,10 +12,12 @@
  */
 
 import parseDiff from 'parse-diff';
+import { resolveGitHubToken, verifyWebhookSignature, type GitHubAppEnv } from './github-app-auth';
 
-export interface Env {
+export interface Env extends GitHubAppEnv {
   AI: any;
   GITHUB_TOKEN?: string;
+  GITHUB_WEBHOOK_SECRET?: string;
   AI_GATEWAY_NAME?: string;
 }
 
@@ -33,9 +35,22 @@ export default {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
+    // Read the raw body once — needed verbatim for HMAC verification, then
+    // parsed from that same string (calling request.json() first would
+    // consume the stream and leave nothing for the signature check).
+    const rawBody = await request.text();
+    const signatureValid = await verifyWebhookSignature(
+      env.GITHUB_WEBHOOK_SECRET,
+      rawBody,
+      request.headers.get('x-hub-signature-256')
+    );
+    if (!signatureValid) {
+      return new Response('Invalid webhook signature', { status: 401 });
+    }
+
     let payload: any;
     try {
-      payload = await request.json();
+      payload = JSON.parse(rawBody);
     } catch {
       return new Response('Invalid JSON', { status: 400 });
     }
@@ -96,8 +111,10 @@ For each issue, provide:
       ]
     }, gatewayOpts);
 
-    // 4. Post feedback back to GitHub PR
-    const token = env.GITHUB_TOKEN;
+    // 4. Post feedback back to GitHub PR — prefer a fresh GitHub App
+    // installation token (persona: clawbuilders-code-reviewer[bot]) when
+    // the App is configured, otherwise fall back to the plain PAT.
+    const token = (await resolveGitHubToken(env, payload.installation?.id)) ?? env.GITHUB_TOKEN;
     if (!token) {
       // No secret configured yet — surface the review directly instead of
       // silently no-oping while still claiming success (the old behavior).

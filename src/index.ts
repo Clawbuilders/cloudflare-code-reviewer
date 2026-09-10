@@ -1,7 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import parseDiff from 'parse-diff';
+import { resolveGitHubToken, verifyWebhookSignature, type GitHubAppEnv } from './github-app-auth';
 
-export interface Env {
+export interface Env extends GitHubAppEnv {
   // Kept as `any` deliberately: Workers AI's typed `Ai` binding infers a
   // different, narrower output shape per model (some resolve `.run()` to a
   // plain `string` instead of `{ response: string }`), which fights the
@@ -9,6 +10,7 @@ export interface Env {
   AI: any;
   PR_COORDINATOR: DurableObjectNamespace<PrReviewCoordinator>;
   GITHUB_TOKEN?: string;
+  GITHUB_WEBHOOK_SECRET?: string;
   AI_GATEWAY_NAME?: string;
 }
 
@@ -75,9 +77,22 @@ export default {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
+    // Read the raw body once — needed verbatim for HMAC verification, then
+    // parsed from that same string (calling request.json() first would
+    // consume the stream and leave nothing for the signature check).
+    const rawBody = await request.text();
+    const signatureValid = await verifyWebhookSignature(
+      env.GITHUB_WEBHOOK_SECRET,
+      rawBody,
+      request.headers.get('x-hub-signature-256')
+    );
+    if (!signatureValid) {
+      return new Response('Invalid webhook signature', { status: 401 });
+    }
+
     let payload: any;
     try {
-      payload = await request.json();
+      payload = JSON.parse(rawBody);
     } catch {
       return new Response('Invalid JSON', { status: 400 });
     }
@@ -327,6 +342,12 @@ export class PrReviewCoordinator extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + 15000);
     await this.ctx.storage.put('pending_pr', pr);
     await this.ctx.storage.put('repo_full_name', payload.repository.full_name);
+    // Present only on deliveries from a GitHub App installation (not a
+    // manually configured repo-level webhook) — resolveGitHubToken() treats
+    // it as absent otherwise and falls back to the plain PAT.
+    if (payload.installation?.id) {
+      await this.ctx.storage.put('installation_id', payload.installation.id);
+    }
 
     return new Response(JSON.stringify({ status: 'queued', pr: pr.number, debounce_seconds: 15 }), {
       headers: { 'Content-Type': 'application/json' }
@@ -337,7 +358,14 @@ export class PrReviewCoordinator extends DurableObject<Env> {
   async alarm() {
     const pr: any = await this.ctx.storage.get('pending_pr');
     const repoFullName: string | undefined = await this.ctx.storage.get('repo_full_name');
+    const installationId: number | undefined = await this.ctx.storage.get('installation_id');
     if (!pr || !repoFullName) return;
+
+    // Prefer a fresh GitHub App installation token (persona:
+    // clawbuilders-code-reviewer[bot]) when the App is configured and this
+    // delivery came from it, otherwise fall back to the plain PAT. Resolved
+    // once and reused for both the early Pillar-1 block and the final post.
+    const githubToken = (await resolveGitHubToken(this.env, installationId)) ?? this.env.GITHUB_TOKEN;
 
     // Every AI Gateway option below is what actually turns on the 24h cache,
     // analytics, and fallback routing — without this 3rd argument,
@@ -356,11 +384,11 @@ export class PrReviewCoordinator extends DurableObject<Env> {
       // ── PILLAR 1: Gitleaks-pattern Zero-Tolerance Secret Gate ───────────────
       const leakedSecrets = scanForSecrets(diffText);
       if (leakedSecrets.length > 0) {
-        if (this.env.GITHUB_TOKEN) {
+        if (githubToken) {
           await fetch(pr.comments_url, {
             method: 'POST',
             headers: {
-              'Authorization': `token ${this.env.GITHUB_TOKEN}`,
+              'Authorization': `token ${githubToken}`,
               'User-Agent': 'Cloudflare-Code-Reviewer',
               'Content-Type': 'application/json'
             },
@@ -409,7 +437,7 @@ export class PrReviewCoordinator extends DurableObject<Env> {
         repoFullName,
         pr.head.sha,
         reviewableFiles.slice(0, 5).map((f) => f.to || '').filter(Boolean),
-        this.env.GITHUB_TOKEN
+        githubToken
       );
 
       // ── MULTI-MODEL PARALLEL EVALUATION (Promise.all) ──────────────────────
@@ -479,7 +507,6 @@ Verification Checklist:
       );
 
       // Post final review back to GitHub PR
-      const githubToken = this.env.GITHUB_TOKEN;
       if (githubToken) {
         await fetch(pr.comments_url, {
           method: 'POST',
@@ -498,6 +525,7 @@ Verification Checklist:
     } finally {
       await this.ctx.storage.delete('pending_pr');
       await this.ctx.storage.delete('repo_full_name');
+      await this.ctx.storage.delete('installation_id');
     }
   }
 }
