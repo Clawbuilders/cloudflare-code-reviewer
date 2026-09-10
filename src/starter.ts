@@ -98,19 +98,26 @@ For each issue, provide:
 
     // 4. Post feedback back to GitHub PR
     const token = env.GITHUB_TOKEN;
-    if (token) {
-      await fetch(pr.comments_url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `token ${token}`,
-          'User-Agent': 'Cloudflare-Starter-Reviewer',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          body: `### 🤖 Automated Code Review (Starter Track)\n*Powered by Cloudflare Workers AI (@cf/qwen/qwen2.5-coder-32b-instruct)*\n\n${aiResponse.response}`
-        })
-      });
+    if (!token) {
+      // No secret configured yet — surface the review directly instead of
+      // silently no-oping while still claiming success (the old behavior).
+      return new Response(
+        `GITHUB_TOKEN not set — skipping GitHub post. Review:\n\n${aiResponse.response}`,
+        { status: 200 }
+      );
     }
+
+    await fetch(pr.comments_url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `token ${token}`,
+        'User-Agent': 'Cloudflare-Starter-Reviewer',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        body: `### 🤖 Automated Code Review (Starter Track)\n*Powered by Cloudflare Workers AI (@cf/qwen/qwen2.5-coder-32b-instruct)*\n\n${aiResponse.response}`
+      })
+    });
 
     return new Response('Review posted successfully', { status: 200 });
   }

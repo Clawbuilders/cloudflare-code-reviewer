@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-code-reviewer-starter",
+  "main": "src/starter.ts",
+  "compatibility_date": "2026-09-09",
+  "ai": {
+    "binding": "AI"
+  }
+}
