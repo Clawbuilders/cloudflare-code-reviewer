@@ -122,10 +122,20 @@ npm run deploy
 ```
 
 ### 4. Configure GitHub Token (Secret)
+
+A classic PAT needs the `repo` scope; a fine-grained PAT needs **Pull requests: Read and write** (plus **Contents: Read**) on the target repo.
+
+**CLI:**
 ```bash
 npx wrangler secret put GITHUB_TOKEN
 ```
-A classic PAT needs the `repo` scope; a fine-grained PAT needs **Pull requests: Read and write** (plus **Contents: Read**) on the target repo.
+
+**Or via the dashboard** (no terminal needed — useful if you'd rather not type a token into a CLI prompt):
+1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages**.
+2. Click into your deployed worker → **Settings** tab → **Variables and Secrets** → **Add**.
+3. Type **Secret** · Name `GITHUB_TOKEN` · Value your PAT → **Save and deploy**.
+
+> **Deploying both tracks?** The secret is per-worker, not per-repo — if you deployed both `npm run deploy` (Advanced) and `npm run deploy:starter` (Starter), you'll see two separate workers in the dashboard (e.g. `cloudflare-code-reviewer` and `cloudflare-code-reviewer-starter`) and **`GITHUB_TOKEN` has to be added to each one separately**. Setting it on only one still returns a 200 from the other, silently skipping the GitHub post — worth checking `wrangler secret list` (or the dashboard) on *both* workers if a review isn't showing up where you expect it.
 
 ### 5. (Optional) Enable AI Gateway caching
 
