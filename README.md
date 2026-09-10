@@ -8,11 +8,21 @@ Built for [ClawBuilders](https://clawbuilder.club) S1:E5 — [Deploy AI Agents w
 
 ## ⚡ One-Click Deploy to Cloudflare
 
-Deploy the complete multi-harness agent live to your own Cloudflare account in under 60 seconds with zero local setup:
+Each track lives in its own fully self-contained directory, so Cloudflare's Deploy to Workers button can target either one directly and deploy *exactly* that track — not a mix of the two.
+
+**Starter Track** (`starter/` — single-file reviewer, ten minutes to set up):
+
+<a href="https://deploy.workers.cloudflare.com/?url=https://github.com/Clawbuilders/cloudflare-code-reviewer/tree/main/starter">
+  <img src="https://deploy.workers.cloudflare.com/button" alt="Deploy Starter Track to Cloudflare" height="38"/>
+</a>
+
+**Advanced Track** (repo root — full 7-pillar suite, Durable Objects, multi-model committee):
 
 <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/Clawbuilders/cloudflare-code-reviewer">
-  <img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" height="38"/>
+  <img src="https://deploy.workers.cloudflare.com/button" alt="Deploy Advanced Track to Cloudflare" height="38"/>
 </a>
+
+> Each button's deploy command is auto-detected from that directory's own `package.json` (`npm run deploy`) — there's no shared root dependency between the two, so one button can never accidentally deploy the other track.
 
 ---
 
@@ -86,46 +96,56 @@ DeepSeek-R1 Distill               Alibaba Qwen 2.5 Coder
 
 ---
 
-## 🧭 Two Tracks in One Repo
+## 🧭 Two Tracks, Two Isolated Directories
 
-### 1. 🚀 Starter Track (`src/starter.ts`)
+### 1. 🚀 Starter Track (`starter/src/index.ts`)
 *   **Concept**: Deploy your first automated PR reviewer in 10 minutes.
-*   **Architecture**: Single stateless Cloudflare Worker + Workers AI (Alibaba Qwen 2.5 Coder).
-*   **Run Locally**: `npm run dev:starter`
-*   **Deploy**: `npm run deploy:starter`
+*   **Architecture**: Single stateless Cloudflare Worker + Workers AI (Alibaba Qwen 2.5 Coder). Its own `package.json`/`wrangler.json` — no dependency on the repo root.
+*   **Run Locally**: `cd starter && npm install && npm run dev`
+*   **Deploy**: `cd starter && npm run deploy` (or click the **Starter** button above!)
 
-### 2. ⚡ Advanced Track (`src/index.ts` — Default Deploy)
+### 2. ⚡ Advanced Track (`src/index.ts` — repo root)
 *   **Concept**: Full Alibaba OCR architecture with the 7-pillar security suite, SQLite Durable Objects, debouncing, and multi-model committee.
 *   **Run Locally**: `npm run dev`
-*   **Deploy**: `npm run deploy` (or click the **Deploy to Cloudflare** button above!)
+*   **Deploy**: `npm run deploy` (or click the **Advanced** button above!)
 
 ---
 
 ## 🚀 Local Quickstart
 
-### 1. Clone & Install
+### 1. Clone
+
 ```bash
 git clone https://github.com/Clawbuilders/cloudflare-code-reviewer.git
 cd cloudflare-code-reviewer
-npm install
 ```
 
-### 2. Run Locally
+Pick a track — each has its own dependencies, so `npm install` runs separately per directory.
+
+**Starter Track:**
 ```bash
-npm run dev
+cd starter
+npm install
+npm run dev        # http://localhost:8787
 ```
 
-### 3. Deploy to Cloudflare
+**Advanced Track** (from the repo root instead):
+```bash
+npm install
+npm run dev        # http://localhost:8787
+```
+
+### 2. Deploy to Cloudflare
 ```bash
 npx wrangler login
-npm run deploy
+npm run deploy      # run from starter/ or the repo root, depending on the track
 ```
 
-### 4. Configure GitHub Token (Secret)
+### 3. Configure GitHub Token (Secret)
 
 A classic PAT needs the `repo` scope; a fine-grained PAT needs **Pull requests: Read and write** (plus **Contents: Read**) on the target repo.
 
-**CLI:**
+**CLI** (run from `starter/` or the repo root, matching the track you deployed):
 ```bash
 npx wrangler secret put GITHUB_TOKEN
 ```
@@ -135,14 +155,14 @@ npx wrangler secret put GITHUB_TOKEN
 2. Click into your deployed worker → **Settings** tab → **Variables and Secrets** → **Add**.
 3. Type **Secret** · Name `GITHUB_TOKEN` · Value your PAT → **Save and deploy**.
 
-> **Deploying both tracks?** The secret is per-worker, not per-repo — if you deployed both `npm run deploy` (Advanced) and `npm run deploy:starter` (Starter), you'll see two separate workers in the dashboard (e.g. `cloudflare-code-reviewer` and `cloudflare-code-reviewer-starter`) and **`GITHUB_TOKEN` has to be added to each one separately**. Setting it on only one still returns a 200 from the other, silently skipping the GitHub post — worth checking `wrangler secret list` (or the dashboard) on *both* workers if a review isn't showing up where you expect it.
+> **Deploying both tracks?** The secret is per-worker, not per-repo — deploying both the Advanced worker (`cloudflare-code-reviewer`) and the Starter worker (`cloudflare-code-reviewer-starter`) means **`GITHUB_TOKEN` has to be added to each one separately**. Setting it on only one still returns a 200 from the other, silently skipping the GitHub post — worth checking `wrangler secret list` (or the dashboard) on *both* workers if a review isn't showing up where you expect it.
 
-### 5. (Optional) Enable AI Gateway caching
+### 4. (Optional) Enable AI Gateway caching
 
 By default the agent calls Workers AI directly — no gateway, no caching. To turn on the 24h diff cache, fallback routing, and observability:
 
 1. Dashboard → **AI** → **AI Gateway** → **Create Gateway** (any name).
-2. Add it to `wrangler.json`:
+2. Add it to that track's `wrangler.json` (`starter/wrangler.json` or the root one):
    ```json
    "vars": { "AI_GATEWAY_NAME": "your-gateway-name" }
    ```
