@@ -10,3 +10,6 @@ function greet(user) {
 }
 
 module.exports = { greet };
+
+// Trigger a fresh push to re-deliver a real pull_request webhook from the
+// GitHub App installation, proving the App-token bot persona end-to-end.
