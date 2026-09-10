@@ -10,7 +10,8 @@
     "deploy:starter": "wrangler deploy --config wrangler.starter.json"
   },
   "dependencies": {
-    "parse-diff": "^0.11.1"
+    "parse-diff": "^0.11.1",
+    "lodash": "4.17.15"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260908.1",
