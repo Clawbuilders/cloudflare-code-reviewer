@@ -141,21 +141,46 @@ npx wrangler login
 npm run deploy      # run from starter/ or the repo root, depending on the track
 ```
 
-### 3. Configure GitHub Token (Secret)
+### 3. Starter Track: Configure GitHub Token (Secret)
 
-A classic PAT needs the `repo` scope; a fine-grained PAT needs **Pull requests: Read and write** (plus **Contents: Read**) on the target repo.
+The Starter Track posts as *you* — a plain Personal Access Token, no app registration needed. A classic PAT needs the `repo` scope; a fine-grained PAT needs **Pull requests: Read and write** (plus **Contents: Read**) on the target repo.
 
-**CLI** (run from `starter/` or the repo root, matching the track you deployed):
+**CLI** (run from `starter/`):
 ```bash
 npx wrangler secret put GITHUB_TOKEN
 ```
 
 **Or via the dashboard** (no terminal needed — useful if you'd rather not type a token into a CLI prompt):
 1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages**.
-2. Click into your deployed worker → **Settings** tab → **Variables and Secrets** → **Add**.
+2. Click into `cloudflare-code-reviewer-starter` → **Settings** tab → **Variables and Secrets** → **Add**.
 3. Type **Secret** · Name `GITHUB_TOKEN` · Value your PAT → **Save and deploy**.
 
-> **Deploying both tracks?** The secret is per-worker, not per-repo — deploying both the Advanced worker (`cloudflare-code-reviewer`) and the Starter worker (`cloudflare-code-reviewer-starter`) means **`GITHUB_TOKEN` has to be added to each one separately**. Setting it on only one still returns a 200 from the other, silently skipping the GitHub post — worth checking `wrangler secret list` (or the dashboard) on *both* workers if a review isn't showing up where you expect it.
+### 3b. Advanced Track: Configure the GitHub App (required — no PAT option)
+
+The Advanced Track posts exclusively as a real bot identity — a GitHub App, not your personal account (`clawbuilders-code-reviewer[bot]` in the reference deployment). There's no PAT fallback here; the App is a required ~5-minute step, not optional. These are exactly the steps (and gotchas) from building the reference deployment:
+
+1. Register under your **org** (not personal account): `github.com/organizations/<org>/settings/apps/new`.
+2. Name it **without** "bot" in the name — GitHub auto-appends `[bot]` in comments (`cf-pr-reviewer` → `cf-pr-reviewer[bot]`).
+3. Skip **Identifying and authorizing users** entirely (delete the empty Redirect URI row) — no OAuth user-login flow needed for a bot identity.
+4. **Webhook**: Active, URL = your deployed worker's `/webhook/github`. Generate + save the webhook secret immediately — GitHub only shows it once.
+5. **Permissions**: only **Contents → Read-only** and **Pull requests → Read and write**. Skip Organization/Account/Enterprise.
+6. ⚠️ **The step everyone misses**: setting the Pull Requests permission does *not* auto-subscribe you to the `pull_request` event. A separate checkbox appears under **Subscribe to events** once that permission is set — check it, or GitHub delivers **nothing**, silently, forever. If this happens to you, diagnose it via the App's own **Settings → Advanced → Recent Deliveries** log (not the Worker's logs — nothing ever arrived there to log).
+7. **Where can this be installed?** → Only on this account.
+8. **Create GitHub App**, then **Generate a private key** (downloads a `.pem`) and note the **App ID** on the same page.
+9. **Install App** on just the target repo(s).
+
+Convert the key format — GitHub gives you PKCS#1, Cloudflare's Web Crypto needs PKCS#8:
+```bash
+openssl pkcs8 -topk8 -nocrypt -in downloaded-key.pem -out pkcs8-key.pem
+```
+
+Set two secrets on the **Advanced worker** (`cloudflare-code-reviewer`), same dashboard/CLI steps as above:
+- `GITHUB_APP_PRIVATE_KEY` — full contents of the converted `pkcs8-key.pem`.
+- `GITHUB_WEBHOOK_SECRET` — the secret from step 4.
+
+`GITHUB_APP_ID` isn't sensitive — it's already baked into `wrangler.json`'s `vars`, no secret needed. `installation_id` isn't configured anywhere either — it arrives automatically on every webhook payload (`payload.installation.id`) since App webhooks are already scoped per-installation; see `src/github-app-auth.ts` for the JWT-signing + installation-token exchange (plain `crypto.subtle`, no npm deps).
+
+> **Never let raw private-key material pass through a chat/AI coding assistant** — copy it directly from the local file into the Cloudflare dashboard. If it ever leaks into a session anyway, treat it as compromised and rotate immediately (Generate a new private key invalidates the old one instantly).
 
 ### 4. (Optional) Enable AI Gateway caching
 

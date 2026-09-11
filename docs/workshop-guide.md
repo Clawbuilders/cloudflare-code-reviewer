@@ -492,6 +492,40 @@ Task:
 }
 ```
 
+#### Step 3: Configure the GitHub App (Advanced Track is App-only)
+
+Unlike the Starter Track's simple PAT, the Advanced Track posts exclusively as a real bot identity — a GitHub App, not your personal account. This takes about five extra minutes and is worth doing properly; the steps below are exactly what worked (and what didn't) building the reference deployment.
+
+1. **Register the App under your org, not your personal account** — `github.com/organizations/<your-org>/settings/apps/new`. (No org? A personal account works too, just skip the org-scoping steps below.)
+2. **Name it without "bot" in the name** — GitHub auto-appends `[bot]` to whatever you pick, so `cf-pr-reviewer` already shows up as `cf-pr-reviewer[bot]` in comments. Adding "-bot" yourself just doubles it up.
+3. **Skip "Identifying and authorizing users" entirely** — delete the empty Redirect URI row if one appears. A bot posting under its own identity needs no OAuth user-login flow.
+4. **Webhook**: Active, URL = your deployed worker's `/webhook/github` endpoint. Generate a webhook secret and save it somewhere immediately — GitHub only shows it once.
+5. **Permissions**: expand Repository permissions, set only **Contents → Read-only** and **Pull requests → Read and write**. Leave Organization/Account/Enterprise permissions alone.
+6. **The step everyone misses**: setting the Pull Requests permission does *not* automatically subscribe you to the `pull_request` event. Scroll down to **Subscribe to events** — a new "Pull request" checkbox appears there once the permission above is set — and check it. Skip this and GitHub delivers **nothing**, with no error anywhere. (See Troubleshooting #5 below for how to actually diagnose this if it happens to you.)
+7. **Where can this be installed?** → Only on this account.
+8. Click **Create GitHub App**, then **Generate a private key** — this downloads a `.pem` file. Note the **App ID** shown on the same page (not sensitive, fine to write down).
+9. **Install the App** on just the target repo(s) — left sidebar → Install App.
+
+Then wire it into the Worker:
+
+```bash
+# GitHub Apps generate PKCS#1 keys; Web Crypto's importKey('pkcs8', ...)
+# needs PKCS#8 — convert once, locally:
+openssl pkcs8 -topk8 -nocrypt -in downloaded-key.pem -out pkcs8-key.pem
+```
+
+Set two Worker secrets (dashboard: Settings → Variables and Secrets → Add → type **Secret**, or `npx wrangler secret put <NAME>`):
+- `GITHUB_APP_PRIVATE_KEY` — the full contents of the converted `pkcs8-key.pem` file.
+- `GITHUB_WEBHOOK_SECRET` — the secret from step 4.
+
+(`GITHUB_APP_ID` isn't sensitive — bake it straight into `wrangler.json`'s `vars` instead of a secret, one less thing to configure.)
+
+At runtime, the Worker never needs a hardcoded installation ID — it reads `payload.installation.id` straight off every webhook delivery, since App webhooks are already scoped per-installation. It signs a JWT with the private key, exchanges it for a short-lived (~1h) installation access token, and posts with that instead of a personal token. See `src/github-app-auth.ts` in the reference repo for the full implementation — it's ~100 lines of plain Web Crypto (`crypto.subtle`), no npm dependencies.
+
+> **Never let raw private-key material pass through a chat/AI coding assistant.** Copy it directly from the local `.pem` file into the Cloudflare dashboard. If it ever does end up pasted into a chat session, treat it as compromised immediately and rotate it — Generate a new private key on the App's settings page invalidates the old one instantly.
+
+---
+
 > **This is the teaching version — the deployed reference repo goes further.** `src/index.ts` in [Clawbuilders/cloudflare-code-reviewer](https://github.com/Clawbuilders/cloudflare-code-reviewer) additionally implements the two **REAL** pillars from §3 as working code, not prompts: a live `POST api.osv.dev/v1/querybatch` lookup for new `package.json` dependencies (Pillar 2), a live deps.dev OpenSSF Scorecard check (Pillar 7), and a GitHub Contents API fetch that hands the security model full file context instead of just the diff hunk (Pillar 5, Mantis-style reachability). All three are pure `fetch()` calls — no new dependencies, nothing that needs a native binary. If you have time in the Advanced Track, walk attendees through `checkOsvVulnerabilities()` and `checkSupplyChainScorecard()` in the repo directly; they're short, and seeing the pipeline return a *real* CVE ID lands better than a simulated one.
 
 > **Caveat — "one-click suggestion blocks" isn't literal here.** Both tracks post the review as a single **issue comment** via `pr.comments_url`. That's the right call for a 3-hour workshop (one POST, no diff-position math), and the ` ```suggestion ` fence still renders as a readable diff block in the comment body — but GitHub's actual one-click "Add suggestion to batch" button only appears on comments created through the **Pull Request Review Comments API** (`POST /repos/{owner}/{repo}/pulls/{pull_number}/comments`), anchored to a specific `commit_id` + `path` + `line`. Say this explicitly when you demo it, so nobody spends the demo slot hunting for a button that isn't there. Wiring up real inline suggestions is a good stretch-goal callout for advanced-track attendees who finish early.
@@ -516,4 +550,6 @@ Task:
 1. **GitHub Webhook Times Out**: GitHub requires an HTTP response within 10 seconds. The Worker acknowledges with `200 OK` immediately upon ingress and delegates work to the Durable Object alarm asynchronously.
 2. **Missing SQLite Migration**: Ensure `wrangler.json` includes `new_sqlite_classes: ["PrReviewCoordinator"]` under migrations.
 3. **GitHub API Permissions**: a classic Personal Access Token needs the `repo` scope; a fine-grained PAT needs **Pull requests: Read and write** (and **Contents: Read** to fetch `diff_url`) on the target repo.
-4. **Setting `GITHUB_TOKEN` without the CLI**: `npx wrangler secret put GITHUB_TOKEN` works, but attendees who'd rather not paste a token into a terminal prompt can use the dashboard instead — Workers & Pages → their worker → Settings → Variables and Secrets → Add → type **Secret**, name `GITHUB_TOKEN`. **The secret is per-worker, not per-repo**: anyone deploying both tracks (`cloudflare-code-reviewer` and `cloudflare-code-reviewer-starter`) needs to add it to *each* worker separately — the one without it still returns `200` and silently skips the GitHub post instead of erroring, which is a confusing thing to debug live.
+4. **Setting `GITHUB_TOKEN` without the CLI (Starter Track only — Advanced is App-only, see #5 and #6 below)**: `npx wrangler secret put GITHUB_TOKEN` works, but attendees who'd rather not paste a token into a terminal prompt can use the dashboard instead — Workers & Pages → their worker → Settings → Variables and Secrets → Add → type **Secret**, name `GITHUB_TOKEN`. **The secret is per-worker, not per-repo**: the worker without it still returns `200` and silently skips the GitHub post instead of erroring, which is a confusing thing to debug live.
+5. **Advanced Track: webhook fires but total silence, no error anywhere**: check the App's own **Settings → Advanced → Recent Deliveries** log first — not the Worker's own logs, which show nothing because nothing ever arrived. If Recent Deliveries is empty even after a real push, the "Pull request" checkbox under Subscribe to events (App setup Step 3.6 above) almost certainly never got saved. Fix it there and click Save — GitHub re-applies it immediately for an App you own, no separate re-approval needed.
+6. **`GITHUB_APP_PRIVATE_KEY` rejected / signing fails**: the key GitHub gives you is PKCS#1 (`BEGIN RSA PRIVATE KEY`); Cloudflare Workers' Web Crypto needs PKCS#8 (`BEGIN PRIVATE KEY`). Convert with `openssl pkcs8 -topk8 -nocrypt -in downloaded-key.pem -out pkcs8-key.pem` and paste the converted file's contents instead.
