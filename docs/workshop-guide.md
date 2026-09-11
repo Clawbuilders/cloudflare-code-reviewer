@@ -520,7 +520,7 @@ Set two Worker secrets (dashboard: Settings → Variables and Secrets → Add �
 
 (`GITHUB_APP_ID` isn't sensitive — bake it straight into `wrangler.json`'s `vars` instead of a secret, one less thing to configure.)
 
-At runtime, the Worker never needs a hardcoded installation ID — it reads `payload.installation.id` straight off every webhook delivery, since App webhooks are already scoped per-installation. It signs a JWT with the private key, exchanges it for a short-lived (~1h) installation access token, and posts with that instead of a personal token. See `src/github-app-auth.ts` in the reference repo for the full implementation — it's ~100 lines of plain Web Crypto (`crypto.subtle`), no npm dependencies.
+At runtime, the Worker never needs a hardcoded installation ID — it reads `payload.installation.id` straight off every webhook delivery, since App webhooks are already scoped per-installation. It signs a JWT with the private key, exchanges it for a short-lived (~1h) installation access token, and posts with that instead of a personal token. See `src/github-app-auth.ts` in the reference repo for the full implementation — it's ~120 lines of plain Web Crypto (`crypto.subtle`), no npm dependencies.
 
 > **Never let raw private-key material pass through a chat/AI coding assistant.** Copy it directly from the local `.pem` file into the Cloudflare dashboard. If it ever does end up pasted into a chat session, treat it as compromised immediately and rotate it — Generate a new private key on the App's settings page invalidates the old one instantly.
 
