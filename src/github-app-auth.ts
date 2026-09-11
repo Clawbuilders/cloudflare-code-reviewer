@@ -76,10 +76,12 @@ export function hasAppCredentials(env: GitHubAppEnv): boolean {
  * Returns a token for `Authorization: token <...>` when posting to GitHub —
  * a fresh App installation token when GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY
  * are configured (requires `installationId`, read from the webhook
- * payload's `installation.id`), otherwise null so callers fall back to a
- * plain GITHUB_TOKEN PAT. Both auth methods stay supported on purpose: this
- * repo is both the live ClawBuilders showcase (App) and what workshop
- * attendees clone and deploy with their own PAT in ten minutes.
+ * payload's `installation.id`), otherwise null.
+ *
+ * The Advanced Track is App-only by design: it posts exclusively as the
+ * clawbuilders-code-reviewer[bot] identity, no PAT fallback. (The Starter
+ * Track's own copy of this file is used differently — see its caller for
+ * the PAT-primary/App-optional contract there instead.)
  */
 export async function resolveGitHubToken(env: GitHubAppEnv, installationId: number | undefined): Promise<string | null> {
   if (!hasAppCredentials(env) || !installationId) return null;

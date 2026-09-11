@@ -9,7 +9,6 @@ export interface Env extends GitHubAppEnv {
   // uniform `.response` access used across every model call below.
   AI: any;
   PR_COORDINATOR: DurableObjectNamespace<PrReviewCoordinator>;
-  GITHUB_TOKEN?: string;
   GITHUB_WEBHOOK_SECRET?: string;
   AI_GATEWAY_NAME?: string;
 }
@@ -342,9 +341,8 @@ export class PrReviewCoordinator extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + 15000);
     await this.ctx.storage.put('pending_pr', pr);
     await this.ctx.storage.put('repo_full_name', payload.repository.full_name);
-    // Present only on deliveries from a GitHub App installation (not a
-    // manually configured repo-level webhook) — resolveGitHubToken() treats
-    // it as absent otherwise and falls back to the plain PAT.
+    // Present only on deliveries from the GitHub App installation — Advanced
+    // is App-only, so no installation.id means no way to post at all.
     if (payload.installation?.id) {
       await this.ctx.storage.put('installation_id', payload.installation.id);
     }
@@ -361,11 +359,13 @@ export class PrReviewCoordinator extends DurableObject<Env> {
     const installationId: number | undefined = await this.ctx.storage.get('installation_id');
     if (!pr || !repoFullName) return;
 
-    // Prefer a fresh GitHub App installation token (persona:
-    // clawbuilders-code-reviewer[bot]) when the App is configured and this
-    // delivery came from it, otherwise fall back to the plain PAT. Resolved
-    // once and reused for both the early Pillar-1 block and the final post.
-    const githubToken = (await resolveGitHubToken(this.env, installationId)) ?? this.env.GITHUB_TOKEN;
+    // App-only: the Advanced Track posts exclusively as the
+    // clawbuilders-code-reviewer[bot] GitHub App identity, no PAT fallback.
+    // null when the App isn't configured or this delivery didn't come from
+    // an installation — both posting sites below already handle a falsy
+    // token by skipping silently, same as before. Resolved once and reused
+    // for both the early Pillar-1 block and the final post.
+    const githubToken = (await resolveGitHubToken(this.env, installationId)) ?? undefined;
 
     // Every AI Gateway option below is what actually turns on the 24h cache,
     // analytics, and fallback routing — without this 3rd argument,
