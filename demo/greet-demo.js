@@ -15,3 +15,5 @@ module.exports = { greet };
 // GitHub App installation, proving the App-token bot persona end-to-end.
 
 // Second attempt: Pull request event subscription was missing, now fixed.
+
+// Third trigger: confirm App-only (no PAT fallback) still posts correctly.
