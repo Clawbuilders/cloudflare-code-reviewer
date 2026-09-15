@@ -387,7 +387,12 @@ export class PrReviewCoordinator extends DurableObject<Env> {
     // an installation — both posting sites below already handle a falsy
     // token by skipping silently, same as before. Resolved once and reused
     // for both the early Pillar-1 block and the final post.
-    const githubToken = (await resolveGitHubToken(this.env, installationId)) ?? undefined;
+    let githubToken: string | undefined;
+    try {
+      githubToken = (await resolveGitHubToken(this.env, installationId)) ?? undefined;
+    } catch (tokenErr: any) {
+      console.error('resolveGitHubToken threw:', tokenErr?.message ?? tokenErr);
+    }
 
     // Every AI Gateway option below is what actually turns on the 24h cache,
     // analytics, and fallback routing — without this 3rd argument,
@@ -397,16 +402,21 @@ export class PrReviewCoordinator extends DurableObject<Env> {
       : undefined;
 
     try {
-      // 1. Fetch raw diff from GitHub. Unauthenticated works for a public
-      // repo's demo PR, but a private repo's diff_url 404s without this —
-      // and that 404 HTML page then parses as an empty diff, so the whole
-      // review silently no-ops below with nothing to log. Send the token
-      // whenever we have one.
-      const diffHeaders: Record<string, string> = { 'User-Agent': 'Cloudflare-Code-Reviewer' };
+      // 1. Fetch the diff via the REST API (not the github.com "/pull/N.diff"
+      // web route pr.diff_url points to). A valid App installation token
+      // still gets a 404 from that web route on a private repo — it isn't
+      // reliably token-authenticated the way the REST API is — so this uses
+      // the documented way to get a diff: GET the PR resource with the
+      // v3.diff media type.
+      const diffHeaders: Record<string, string> = {
+        'User-Agent': 'Cloudflare-Code-Reviewer',
+        'Accept': 'application/vnd.github.v3.diff'
+      };
       if (githubToken) diffHeaders['Authorization'] = `token ${githubToken}`;
-      const diffResponse = await fetch(pr.diff_url, { headers: diffHeaders });
+      const diffApiUrl = `https://api.github.com/repos/${repoFullName}/pulls/${pr.number}`;
+      const diffResponse = await fetch(diffApiUrl, { headers: diffHeaders });
       if (!diffResponse.ok) {
-        console.error(`Failed to fetch PR diff: ${diffResponse.status} ${diffResponse.statusText} from ${pr.diff_url}`);
+        console.error(`Failed to fetch PR diff: ${diffResponse.status} ${diffResponse.statusText} from ${diffApiUrl}`);
         await this.ctx.storage.delete('pending_pr');
         return;
       }

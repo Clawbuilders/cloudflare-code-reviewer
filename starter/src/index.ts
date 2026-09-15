@@ -63,18 +63,24 @@ export default {
     const pr = payload.pull_request;
 
     // Resolved up front (not just before posting) because the diff fetch
-    // below needs it too: pr.diff_url 404s unauthenticated on a private
-    // repo, and that 404 page then parses as an empty diff rather than
-    // failing loudly.
+    // below needs it too.
     const token = (await resolveGitHubToken(env, payload.installation?.id)) ?? env.GITHUB_TOKEN;
 
-    // 1. Fetch raw diff from GitHub
-    const diffHeaders: Record<string, string> = { 'User-Agent': 'Cloudflare-Starter-Reviewer' };
+    // 1. Fetch the diff via the REST API (not the github.com "/pull/N.diff"
+    // web route pr.diff_url points to) — a valid App installation token
+    // still gets a 404 from that web route on a private repo, so this uses
+    // the documented way to get a diff: GET the PR resource with the
+    // v3.diff media type.
+    const diffHeaders: Record<string, string> = {
+      'User-Agent': 'Cloudflare-Starter-Reviewer',
+      'Accept': 'application/vnd.github.v3.diff'
+    };
     if (token) diffHeaders['Authorization'] = `token ${token}`;
-    const diffResponse = await fetch(pr.diff_url, { headers: diffHeaders });
+    const diffApiUrl = `https://api.github.com/repos/${payload.repository.full_name}/pulls/${pr.number}`;
+    const diffResponse = await fetch(diffApiUrl, { headers: diffHeaders });
     if (!diffResponse.ok) {
       return new Response(
-        `Failed to fetch PR diff: ${diffResponse.status} ${diffResponse.statusText} from ${pr.diff_url}`,
+        `Failed to fetch PR diff: ${diffResponse.status} ${diffResponse.statusText} from ${diffApiUrl}`,
         { status: 502 }
       );
     }
