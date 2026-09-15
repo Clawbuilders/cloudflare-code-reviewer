@@ -182,6 +182,16 @@ Set two secrets on the **Advanced worker** (`cloudflare-code-reviewer`), same da
 
 > **Never let raw private-key material pass through a chat/AI coding assistant** — copy it directly from the local file into the Cloudflare dashboard. If it ever leaks into a session anyway, treat it as compromised and rotate immediately (Generate a new private key invalidates the old one instantly).
 
+### 3c. ⚠️ Private repos need one more thing than public repos do
+
+Both tracks were originally built and demoed against **this repo**, which is public — a diff fetch against a public repo's `pr.diff_url` (`github.com/OWNER/REPO/pull/N.diff`) works with no auth header at all. Point either track at a **private** repo and that changes:
+
+- **The diff fetch needs auth too, not just the comment post.** An unauthenticated request to a private repo's `pr.diff_url` returns a `404` — which is GitHub's HTML error page, not a diff. `parseDiff()` on that HTML yields zero files, and both tracks treat "zero reviewable files" as "nothing to review" and quietly stop. No exception, no failed request in your logs — the Worker looks like it ran fine. Fix: send the same `Authorization: token <...>` header on the diff fetch that you already send on the comment-posting fetch.
+- **On the Advanced Track (GitHub App auth), that's still not enough.** Even a real, successfully-minted App installation token gets a `404` from that same `pull/N.diff` web route on a private repo — it doesn't reliably honor App tokens the way the REST API does. `src/index.ts` fetches the diff from `GET https://api.github.com/repos/{owner}/{repo}/pulls/{number}` with `Accept: application/vnd.github.v3.diff` instead, which is the documented way to get a diff and works correctly with an App token on a private repo. If you fork the Starter Track to use App auth instead of a plain PAT, use the same endpoint — `starter/src/index.ts` already does.
+- **Both tracks now fail loudly instead of silently.** Every GitHub-bound `fetch()` call checks `response.ok` and logs (`console.error` on the Advanced Track, a `502` response body on the Starter Track) instead of assuming a non-throwing `fetch()` means success — `fetch()` never throws on a 4xx/5xx, so an unchecked response used to look identical to a successful post in every log available.
+
+This is exactly what happened deploying the reference App against a real private production repo: the App was installed correctly, permissioned correctly, and the webhook was delivered correctly — and it still never posted a single review until both of the above were fixed. See `docs/workshop-guide.md` §8 Troubleshooting #7 for the full writeup.
+
 ### 4. (Optional) Enable AI Gateway caching
 
 By default the agent calls Workers AI directly — no gateway, no caching. To turn on the 24h diff cache, fallback routing, and observability:

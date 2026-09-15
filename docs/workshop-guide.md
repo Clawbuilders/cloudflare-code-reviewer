@@ -242,9 +242,18 @@ export default {
 
     const pr = payload.pull_request;
 
-    // 1. Fetch raw diff directly from GitHub
+    // 1. Fetch raw diff directly from GitHub.
+    // ⚠️ Private repo? This Authorization header is not optional. GitHub's
+    // pull/N.diff route 404s with no auth on a private repo — and that 404
+    // HTML page then parses as an empty diff below, so the whole review
+    // silently no-ops with nothing to log. Works fine unauthenticated only
+    // because a public demo repo doesn't need auth to read a diff at all.
+    // See §8 Troubleshooting #7.
     const diffRes = await fetch(pr.diff_url, {
-      headers: { 'User-Agent': 'Cloudflare-PR-Reviewer' }
+      headers: {
+        'User-Agent': 'Cloudflare-PR-Reviewer',
+        'Authorization': `token ${env.GITHUB_TOKEN}`
+      }
     });
     const diffText = await diffRes.text();
 
@@ -410,9 +419,21 @@ export class PrReviewCoordinator extends DurableObject<Env> {
     const pr: any = await this.ctx.storage.get('pending_pr');
     if (!pr) return;
 
-    // 1. Fetch & Parse Diff
+    // 1. Fetch & Parse Diff.
+    // ⚠️ Private repo? This Authorization header is not optional — see the
+    // comment on the Starter Track's equivalent fetch above, and §8
+    // Troubleshooting #7. Once you wire up the GitHub App in Step 3 below,
+    // prefer the REST API over this .diff web route entirely: even a valid
+    // App installation token doesn't reliably get honored by
+    // pull/N.diff on a private repo. Use
+    // `GET /repos/{owner}/{repo}/pulls/{number}` with
+    // `Accept: application/vnd.github.v3.diff` instead — see
+    // `src/index.ts` in this repo for the reference implementation.
     const diffText = await fetch(pr.diff_url, {
-      headers: { 'User-Agent': 'Cloudflare-Reviewer-Bot' }
+      headers: {
+        'User-Agent': 'Cloudflare-Reviewer-Bot',
+        'Authorization': `token ${this.env.GITHUB_TOKEN}`
+      }
     }).then(r => r.text());
 
     const files = parseDiff(diffText).filter(
@@ -553,3 +574,7 @@ At runtime, the Worker never needs a hardcoded installation ID — it reads `pay
 4. **Setting `GITHUB_TOKEN` without the CLI (Starter Track only — Advanced is App-only, see #5 and #6 below)**: `npx wrangler secret put GITHUB_TOKEN` works, but attendees who'd rather not paste a token into a terminal prompt can use the dashboard instead — Workers & Pages → their worker → Settings → Variables and Secrets → Add → type **Secret**, name `GITHUB_TOKEN`. **The secret is per-worker, not per-repo**: the worker without it still returns `200` and silently skips the GitHub post instead of erroring, which is a confusing thing to debug live.
 5. **Advanced Track: webhook fires but total silence, no error anywhere**: check the App's own **Settings → Advanced → Recent Deliveries** log first — not the Worker's own logs, which show nothing because nothing ever arrived. If Recent Deliveries is empty even after a real push, the "Pull request" checkbox under Subscribe to events (App setup Step 3.6 above) almost certainly never got saved. Fix it there and click Save — GitHub re-applies it immediately for an App you own, no separate re-approval needed.
 6. **`GITHUB_APP_PRIVATE_KEY` rejected / signing fails**: the key GitHub gives you is PKCS#1 (`BEGIN RSA PRIVATE KEY`); Cloudflare Workers' Web Crypto needs PKCS#8 (`BEGIN PRIVATE KEY`). Convert with `openssl pkcs8 -topk8 -nocrypt -in downloaded-key.pem -out pkcs8-key.pem` and paste the converted file's contents instead.
+7. **Private repo: webhook fires, Alarm/invocation logs "Ok", nothing ever posts, and there's no error anywhere** — this is the private-vs-public-repo gotcha, and it bit the reference deployment in production before it was diagnosed and fixed:
+   - **Cause #1 — unauthenticated diff fetch.** `pr.diff_url` (`github.com/OWNER/REPO/pull/N.diff`) works with *no* auth header for a **public** repo, which is why a workshop demo against a public repo (or this repo's own public demo PRs) looks fine even with the header missing. Point the same code at a **private** repo and that same request 404s. The 404 HTML page then parses as zero changed files via `parseDiff()`, which every track's "no reviewable files" early-return treats as "nothing to review" — not as an error. Fix: always send `Authorization: token <...>` on the diff fetch, the same as you already do on the comment-posting fetch (both tutorial snippets above now show this).
+   - **Cause #2 — even with a valid GitHub App installation token, that same `.diff` web route can still 404 on a private repo.** It doesn't reliably honor App tokens the way the REST API does. If you're on the Advanced Track's App-based auth (Step 3 below), skip `pr.diff_url` entirely and fetch `GET https://api.github.com/repos/{owner}/{repo}/pulls/{number}` with header `Accept: application/vnd.github.v3.diff` instead — that's the documented, App-token-safe way to get a diff. See `src/index.ts` in this repo for the reference implementation (and `starter/src/index.ts`, which needs the same fix if you're combining the Starter Track's simplicity with an App instead of a plain PAT).
+   - **Either way, don't let this fail silently again**: check `diffResponse.ok` before parsing, and `console.error` (plus, for the comment-post fetch, the same check) on a non-2xx — a plain `fetch()` never throws on 4xx/5xx, so an unchecked response looks identical to success in every log you have.
