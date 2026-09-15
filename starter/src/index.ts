@@ -124,7 +124,7 @@ For each issue, provide:
       );
     }
 
-    await fetch(pr.comments_url, {
+    const postRes = await fetch(pr.comments_url, {
       method: 'POST',
       headers: {
         'Authorization': `token ${token}`,
@@ -135,6 +135,19 @@ For each issue, provide:
         body: `### 🤖 Automated Code Review (Starter Track)\n*Powered by Cloudflare Workers AI (@cf/qwen/qwen2.5-coder-32b-instruct)*\n\n${aiResponse.response}`
       })
     });
+
+    if (!postRes.ok) {
+      // fetch() doesn't throw on 4xx/5xx — check explicitly, or a permission
+      // gap (e.g. the App has pull_requests:write but not the issues:write
+      // that this issue-comments endpoint actually requires) fails silently
+      // while this handler still returns 200.
+      const detail = await postRes.text();
+      console.error(`Failed to post PR comment: ${postRes.status} ${postRes.statusText} — ${detail}`);
+      return new Response(
+        `GitHub rejected the comment post: ${postRes.status} ${postRes.statusText} — ${detail}`,
+        { status: 502 }
+      );
+    }
 
     return new Response('Review posted successfully', { status: 200 });
   }

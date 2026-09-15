@@ -315,6 +315,28 @@ async function checkSupplyChainScorecard(deps: DependencyUpdate[]): Promise<stri
   return findings;
 }
 
+// Posts a PR comment and surfaces failure instead of swallowing it — a plain
+// fetch() doesn't throw on 403/404, so an unchecked call here previously
+// looked identical (in logs and to the Alarm's own "Ok" status) whether the
+// comment posted or GitHub rejected it (e.g. "Resource not accessible by
+// integration" when the App has pull_requests:write but not the issues:write
+// that POST /issues/{n}/comments — which is what pr.comments_url points
+// to — actually requires).
+async function postPrComment(commentsUrl: string, token: string, body: string): Promise<void> {
+  const res = await fetch(commentsUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `token ${token}`,
+      'User-Agent': 'Cloudflare-Code-Reviewer',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ body })
+  });
+  if (!res.ok) {
+    console.error(`Failed to post PR comment: ${res.status} ${res.statusText} — ${await res.text()}`);
+  }
+}
+
 // ── Durable Object: State, Debounce & Multi-Model Committee ────────────────────
 export class PrReviewCoordinator extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -385,17 +407,13 @@ export class PrReviewCoordinator extends DurableObject<Env> {
       const leakedSecrets = scanForSecrets(diffText);
       if (leakedSecrets.length > 0) {
         if (githubToken) {
-          await fetch(pr.comments_url, {
-            method: 'POST',
-            headers: {
-              'Authorization': `token ${githubToken}`,
-              'User-Agent': 'Cloudflare-Code-Reviewer',
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              body: `### 🚨 [CRITICAL SECURITY BLOCK — Gitleaks-pattern Scan]\n\nHardcoded credentials detected in PR diff: **${leakedSecrets.join(', ')}**.\n\nPlease revoke this token immediately and remove it from git history before merging.`
-            })
-          });
+          await postPrComment(
+            pr.comments_url,
+            githubToken,
+            `### 🚨 [CRITICAL SECURITY BLOCK — Gitleaks-pattern Scan]\n\nHardcoded credentials detected in PR diff: **${leakedSecrets.join(', ')}**.\n\nPlease revoke this token immediately and remove it from git history before merging.`
+          );
+        } else {
+          console.error('Secrets detected but no githubToken resolved — cannot post block comment.');
         }
         await this.ctx.storage.delete('pending_pr');
         return;
@@ -508,17 +526,16 @@ Verification Checklist:
 
       // Post final review back to GitHub PR
       if (githubToken) {
-        await fetch(pr.comments_url, {
-          method: 'POST',
-          headers: {
-            'Authorization': `token ${githubToken}`,
-            'User-Agent': 'Cloudflare-Code-Reviewer',
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            body: `### 🛡️ AI Review Committee (7-Pillar Security Suite)\n*Gitleaks-pattern • OSV.dev (live) • Hard-Rails Filter • OPA-inspired Policy • Mantis-style Reachability • OWASP-ASRH-style Regression • OpenSSF Scorecard (live)*\n\n${finalSynthesis.response}`
-          })
-        });
+        await postPrComment(
+          pr.comments_url,
+          githubToken,
+          `### 🛡️ AI Review Committee (7-Pillar Security Suite)\n*Gitleaks-pattern • OSV.dev (live) • Hard-Rails Filter • OPA-inspired Policy • Mantis-style Reachability • OWASP-ASRH-style Regression • OpenSSF Scorecard (live)*\n\n${finalSynthesis.response}`
+        );
+      } else {
+        console.error(
+          `No githubToken resolved for ${repoFullName}#${pr.number} — review computed but not posted. ` +
+          `Check GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY and that the webhook payload carried installation.id.`
+        );
       }
     } catch (err: any) {
       console.error('Error running review:', err);
