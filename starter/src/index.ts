@@ -62,10 +62,22 @@ export default {
 
     const pr = payload.pull_request;
 
+    // Resolved up front (not just before posting) because the diff fetch
+    // below needs it too: pr.diff_url 404s unauthenticated on a private
+    // repo, and that 404 page then parses as an empty diff rather than
+    // failing loudly.
+    const token = (await resolveGitHubToken(env, payload.installation?.id)) ?? env.GITHUB_TOKEN;
+
     // 1. Fetch raw diff from GitHub
-    const diffResponse = await fetch(pr.diff_url, {
-      headers: { 'User-Agent': 'Cloudflare-Starter-Reviewer' }
-    });
+    const diffHeaders: Record<string, string> = { 'User-Agent': 'Cloudflare-Starter-Reviewer' };
+    if (token) diffHeaders['Authorization'] = `token ${token}`;
+    const diffResponse = await fetch(pr.diff_url, { headers: diffHeaders });
+    if (!diffResponse.ok) {
+      return new Response(
+        `Failed to fetch PR diff: ${diffResponse.status} ${diffResponse.statusText} from ${pr.diff_url}`,
+        { status: 502 }
+      );
+    }
     const diffText = await diffResponse.text();
 
     // 2. Deterministic Filter: Skip lockfiles, bundles, and assets (Alibaba OCR principle)
@@ -114,7 +126,7 @@ For each issue, provide:
     // 4. Post feedback back to GitHub PR — prefer a fresh GitHub App
     // installation token (persona: clawbuilders-code-reviewer[bot]) when
     // the App is configured, otherwise fall back to the plain PAT.
-    const token = (await resolveGitHubToken(env, payload.installation?.id)) ?? env.GITHUB_TOKEN;
+    // (token was resolved above, before the diff fetch.)
     if (!token) {
       // No secret configured yet — surface the review directly instead of
       // silently no-oping while still claiming success (the old behavior).

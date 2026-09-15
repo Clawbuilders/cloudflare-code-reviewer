@@ -397,10 +397,19 @@ export class PrReviewCoordinator extends DurableObject<Env> {
       : undefined;
 
     try {
-      // 1. Fetch raw diff from GitHub
-      const diffResponse = await fetch(pr.diff_url, {
-        headers: { 'User-Agent': 'Cloudflare-Code-Reviewer' }
-      });
+      // 1. Fetch raw diff from GitHub. Unauthenticated works for a public
+      // repo's demo PR, but a private repo's diff_url 404s without this —
+      // and that 404 HTML page then parses as an empty diff, so the whole
+      // review silently no-ops below with nothing to log. Send the token
+      // whenever we have one.
+      const diffHeaders: Record<string, string> = { 'User-Agent': 'Cloudflare-Code-Reviewer' };
+      if (githubToken) diffHeaders['Authorization'] = `token ${githubToken}`;
+      const diffResponse = await fetch(pr.diff_url, { headers: diffHeaders });
+      if (!diffResponse.ok) {
+        console.error(`Failed to fetch PR diff: ${diffResponse.status} ${diffResponse.statusText} from ${pr.diff_url}`);
+        await this.ctx.storage.delete('pending_pr');
+        return;
+      }
       const diffText = await diffResponse.text();
 
       // ── PILLAR 1: Gitleaks-pattern Zero-Tolerance Secret Gate ───────────────
