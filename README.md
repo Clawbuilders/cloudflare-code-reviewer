@@ -38,6 +38,7 @@ A Cloudflare Worker is a V8 isolate — it **cannot** execute native binaries (n
 | **1** | 🔑 **[gitleaks/gitleaks](https://github.com/gitleaks/gitleaks)**-pattern scan | HEURISTIC | Zero-tolerance regex scan for hardcoded API keys, Stripe/AWS/Slack/GitHub tokens, private key blocks, and `.env` leaks. Blocks the PR outright if found. |
 | **2** | 📦 **[osv.dev](https://osv.dev)** vulnerability lookup | **REAL** | New `package.json` dependencies are batch-queried live against Google's public OSV vulnerability database — real CVE/GHSA IDs, not a guess. |
 | **3** | 🔍 Hard-Rails file filter (Alibaba OCR-style) | HEURISTIC | Strips lockfiles, bundles, and vendor code before spending LLM tokens. Not a Semgrep integration — SAST-style reasoning happens in the LLM pass (Pillar 5). |
+| **3.5** | 🎯 **[typesafe/jev](https://developers.cloudflare.com/ai/models/typesafe/jev/)** triage gate | **REAL** | Cloudflare's calibrated decision model judges whether the diff needs the security specialist, the quality specialist, both, or neither — a docs-only or dependency-bump PR skips the multi-model committee entirely. A real OSV.dev/policy-gate finding always forces the security pass regardless of what Jev says; it can only add scrutiny, never suppress a deterministic one. |
 | **4** | 🛡️ **[open-policy-agent/opa](https://github.com/open-policy-agent/opa)**-inspired policy gate | HEURISTIC | Flags changes to CI/CD workflows (`.github/workflows/`), auth code, or infra config, and PRs over a blast-radius file-count threshold. *(Real OPA is possible: compile a Rego policy to WASM with `opa build -t wasm` and evaluate it with [`@open-policy-agent/opa-wasm`](https://github.com/open-policy-agent/npm-opa-wasm) — a good stretch goal, not built here since it needs a build step.)* |
 | **5** | 🧰 **[google/mantis](https://github.com/google/mantis)**-style reachability check | **REAL context** | Pulls the *full file* (not just the diff hunk) for changed files via the GitHub Contents API, so the security model can judge whether a flaw is actually reachable instead of pattern-matching a hunk in isolation. |
 | **6** | 🧪 **[OWASP/Agent-Security-Regression-Harness](https://github.com/OWASP/Agent-Security-Regression-Harness)**-style regression gate | HEURISTIC | The Lead Arbiter (Llama 3.3 70B) is instructed to verify proposed fixes introduce zero secondary vulnerabilities before posting. *(The real OWASP harness is an external, executable regression suite meant to run in CI against a deployed agent endpoint — a good companion GitHub Action, not something that runs inside the Worker itself.)* |
@@ -71,6 +72,16 @@ A Cloudflare Worker is a V8 isolate — it **cannot** execute native binaries (n
               [Pillar 7] deps.dev Scorecard
               (REAL — supply-chain check)
                          │
+                         ▼
+              [Pillar 3.5] Jev Triage Gate
+         needs_security? needs_quality? category?
+      (forced on by any real Pillar 2/4/7 finding)
+                         │
+      ┌──────────────────┴──────────────────┐
+      │ Both skipped → short comment posted,│
+      │ committee never runs (early return) │
+      └──────────────────┬──────────────────┘
+                         │ (at least one needed)
         ┌────────────────┴────────────────┐
         │ Parallel Review via Promise.all,│
         │ each proxied through AI Gateway │
@@ -78,7 +89,8 @@ A Cloudflare Worker is a V8 isolate — it **cannot** execute native binaries (n
 [Pillar 5: Security Specialist]   [Code Quality Specialist]
 DeepSeek-R1 Distill               Alibaba Qwen 2.5 Coder
 + full-file context (REAL) for    (Clean Code & Diffs)
-  Mantis-style reachability
+  Mantis-style reachability          (only if needs_quality)
+     (only if needs_security)
         │                                 │
         └────────────────┬────────────────┘
                          │
@@ -179,6 +191,8 @@ Set two secrets on the **Advanced worker** (`cloudflare-code-reviewer`), same da
 - `GITHUB_WEBHOOK_SECRET` — the secret from step 4.
 
 `GITHUB_APP_ID` isn't sensitive — it's already baked into `wrangler.json`'s `vars`, no secret needed. `installation_id` isn't configured anywhere either — it arrives automatically on every webhook payload (`payload.installation.id`) since App webhooks are already scoped per-installation; see `src/github-app-auth.ts` for the JWT-signing + installation-token exchange (plain `crypto.subtle`, no npm deps).
+
+`JEV_ESCALATION_FLOOR` (also a plain `wrangler.json` var, default `0.5`) is the Noul-probability floor the Jev triage gate uses to decide a diff needs a given specialist — lower it to run the committee more often (more cautious, more expensive), raise it to skip more aggressively. It's a starting point, not a validated threshold; tune it against this repo's own PR traffic before trusting it on anything that matters.
 
 > **Never let raw private-key material pass through a chat/AI coding assistant** — copy it directly from the local file into the Cloudflare dashboard. If it ever leaks into a session anyway, treat it as compromised and rotate immediately (Generate a new private key invalidates the old one instantly).
 

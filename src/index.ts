@@ -11,6 +11,12 @@ export interface Env extends GitHubAppEnv {
   PR_COORDINATOR: DurableObjectNamespace<PrReviewCoordinator>;
   GITHUB_WEBHOOK_SECRET?: string;
   AI_GATEWAY_NAME?: string;
+  // Noul-probability floor above which Jev's triage call routes a diff to
+  // the corresponding specialist. Lower = more cautious (runs the
+  // committee more often); higher = cheaper but more likely to skip a real
+  // dependency_bump/docs-only false negative. 0.5 is a starting point, not
+  // a validated threshold — tune against this repo's own PR traffic.
+  JEV_ESCALATION_FLOOR?: string;
 }
 
 // ── Ingress Worker ────────────────────────────────────────────────────────────
@@ -55,6 +61,7 @@ export default {
       <li><strong>1. Gitleaks-pattern Secret Scan</strong><span class="tag heuristic">HEURISTIC</span> — regex/entropy rules modeled on Gitleaks' public default ruleset. Blocks the PR on hardcoded API keys, tokens, and private keys.</li>
       <li><strong>2. OSV.dev Vulnerability Lookup</strong><span class="tag real">REAL</span> — new/changed <code>package.json</code> dependencies are queried live against <a href="https://osv.dev" style="color:#fe5e1e">osv.dev</a>'s public vulnerability database.</li>
       <li><strong>3. Hard-Rails File Filter</strong><span class="tag heuristic">HEURISTIC</span> — Alibaba-OCR-style noise reduction (lockfiles, bundles, vendor code). Not a Semgrep integration; SAST-style reasoning happens in the LLM pass below.</li>
+      <li><strong>3.5. Jev Triage Gate</strong><span class="tag real">REAL</span> — <a href="https://developers.cloudflare.com/ai/models/typesafe/jev/" style="color:#fe5e1e">typesafe/jev</a> (Cloudflare's calibrated decision model) judges whether this diff needs the security specialist, the quality specialist, both, or neither — a docs-only or dependency-bump PR skips the expensive committee entirely. Deterministic findings (OSV.dev, policy gate) always force a security pass regardless of what Jev says.</li>
       <li><strong>4. OPA-inspired Policy Gate</strong><span class="tag heuristic">HEURISTIC</span> — flags changes to CI/CD workflows, auth code, or infra config, and PRs over a blast-radius file-count threshold.</li>
       <li><strong>5. Mantis-style Reachability Check</strong><span class="tag real">REAL context, heuristic reasoning</span> — pulls full file content (not just the diff hunk) from the GitHub Contents API so the security model can judge whether a flaw is actually reachable.</li>
       <li><strong>6. OWASP-ASRH-style Regression Check</strong><span class="tag heuristic">HEURISTIC</span> — the Lead Arbiter is instructed to verify proposed fixes introduce no secondary vulnerabilities before posting.</li>
@@ -237,6 +244,83 @@ function evaluateOpaPolicy(parsedFiles: parseDiff.File[]): string[] {
   }
 
   return policyViolations;
+}
+
+// Jev Triage Gate — decides which specialist(s) actually need to run.
+// typesafe/jev (https://developers.cloudflare.com/ai/models/typesafe/jev/)
+// is a text-only decision model: cheap, calibrated Noul/Choice judgments,
+// not a code generator. It can't replace DeepSeek-R1 or Qwen's reasoning —
+// it sits in front of them as a cascade gate, the same shape as the other
+// two Episode 5 bonus tracks (clawbuilders-story-agent's redaction pass,
+// web-qa-jev-agent's escalation gate): the expensive tier only runs when
+// something actually needs it.
+interface JevTriageResult {
+  needsSecurity: boolean;
+  needsQuality: boolean;
+  category: string;
+  securityNoul: number;
+  qualityNoul: number;
+}
+
+async function triageWithJev(
+  ai: any,
+  reviewableFiles: parseDiff.File[],
+  diffHunk: string,
+  policyAlerts: string[],
+  vulnerabilityFindings: string[],
+  escalationFloor: number,
+  gatewayOpts: any
+): Promise<JevTriageResult> {
+  const response = await ai.run(
+    'typesafe/jev',
+    {
+      state: {
+        files_changed: reviewableFiles.map((f) => f.to || f.from || '').filter(Boolean),
+        diff_hunk: diffHunk.slice(0, 4000),
+      },
+      questions: {
+        needs_security_review: {
+          type: 'noul',
+          instructions:
+            "Does this diff touch logic where a real security vulnerability (injection, auth bypass, unsafe deserialization, race condition, resource leak) is plausible? Answer no for docs-only, style-only, or test-fixture-only changes.",
+        },
+        needs_quality_review: {
+          type: 'noul',
+          instructions:
+            'Would a human code reviewer likely have substantive style/correctness feedback on this diff, beyond nitpicks? Answer no for trivial or mechanical changes (dependency bumps, generated files, pure formatting).',
+        },
+        category: {
+          type: 'choice',
+          instructions: 'What kind of change is this?',
+          criteria: {
+            feature: 'New functionality',
+            bugfix: 'Fixes broken behavior',
+            refactor: 'Restructures existing code without changing behavior',
+            docs_or_config: 'Documentation, comments, or non-code config only',
+            dependency_bump: 'Only updates dependency versions',
+            test_only: 'Only adds or modifies tests',
+          },
+        },
+      },
+    },
+    gatewayOpts
+  );
+
+  const securityNoul = response.answers.needs_security_review.noul;
+  const qualityNoul = response.answers.needs_quality_review.noul;
+
+  // Jev can only ADD scrutiny, never suppress a real deterministic finding —
+  // if OSV.dev or the policy gate already flagged something concrete, the
+  // security specialist runs regardless of what the triage call says.
+  const forcedBySignal = policyAlerts.length > 0 || vulnerabilityFindings.length > 0;
+
+  return {
+    needsSecurity: securityNoul >= escalationFloor || forcedBySignal,
+    needsQuality: qualityNoul >= escalationFloor,
+    category: response.answers.category.choice,
+    securityNoul,
+    qualityNoul,
+  };
 }
 
 // Pillar 5: Mantis-style Reachability Check — REAL context via GitHub Contents API
@@ -469,39 +553,75 @@ export class PrReviewCoordinator extends DurableObject<Env> {
 
       const diffHunk = JSON.stringify(reviewableFiles.slice(0, 5));
 
-      // ── PILLAR 5: Mantis-style Reachability Context (real GitHub content) ──
-      const fullFileContext = await fetchFullFileContext(
-        repoFullName,
-        pr.head.sha,
-        reviewableFiles.slice(0, 5).map((f) => f.to || '').filter(Boolean),
-        githubToken
+      // ── JEV TRIAGE GATE: which specialist(s) does this diff actually need? ──
+      const escalationFloor = parseFloat(this.env.JEV_ESCALATION_FLOOR ?? '0.5') || 0.5;
+      const triage = await triageWithJev(
+        this.env.AI,
+        reviewableFiles,
+        diffHunk,
+        policyAlerts,
+        vulnerabilityFindings,
+        escalationFloor,
+        gatewayOpts
       );
 
+      if (!triage.needsSecurity && !triage.needsQuality) {
+        const skipSummary = `### 🛡️ AI Review Committee — Jev Triage\n\n[typesafe/jev](https://developers.cloudflare.com/ai/models/typesafe/jev/) classified this as a **${triage.category}** change with no security or code-quality signal worth a full multi-model review (security confidence ${triage.securityNoul.toFixed(2)}, quality confidence ${triage.qualityNoul.toFixed(2)}). Skipping DeepSeek-R1 + Qwen 2.5 Coder for this PR.\n\n_Deterministic checks (secret scan, OSV.dev, policy gate) already ran above and would have forced a full review automatically if any of them had found something._`;
+        this.ctx.storage.sql.exec(
+          'INSERT INTO reviews (commit_sha, summary) VALUES (?, ?)',
+          pr.head.sha,
+          skipSummary
+        );
+        if (githubToken) {
+          await postPrComment(pr.comments_url, githubToken, skipSummary);
+        }
+        await this.ctx.storage.delete('pending_pr');
+        return;
+      }
+
+      // ── PILLAR 5: Mantis-style Reachability Context (real GitHub content) ──
+      // Only fetched when the security specialist is actually going to run —
+      // it exists solely to feed that specialist's reachability reasoning.
+      const fullFileContext = triage.needsSecurity
+        ? await fetchFullFileContext(
+            repoFullName,
+            pr.head.sha,
+            reviewableFiles.slice(0, 5).map((f) => f.to || '').filter(Boolean),
+            githubToken
+          )
+        : '';
+
       // ── MULTI-MODEL PARALLEL EVALUATION (Promise.all) ──────────────────────
+      // Each specialist only runs if the Jev triage gate above said it's
+      // needed — a docs-only or dependency-bump PR skips both and never
+      // reaches this point at all (see the early return above).
       const [securityReport, codeReport] = await Promise.all([
         // Security Specialist: DeepSeek R1 does Mantis-style reachability reasoning
-        this.env.AI.run('@cf/deepseek-ai/deepseek-r1-distill-qwen-32b', {
-          messages: [
-            {
-              role: 'system',
-              content: `You are a security auditor doing Mantis-style verification: don't just pattern-match, check whether a flagged issue is actually REACHABLE given the full file context provided.
+        triage.needsSecurity
+          ? this.env.AI.run('@cf/deepseek-ai/deepseek-r1-distill-qwen-32b', {
+              messages: [
+                {
+                  role: 'system',
+                  content: `You are a security auditor doing Mantis-style verification: don't just pattern-match, check whether a flagged issue is actually REACHABLE given the full file context provided.
 Look for:
 - Null Pointer Exceptions (NPE) & undefined dereferencing
 - SQL / Command injection & sanitization bypasses
 - Concurrency race conditions & unclosed resource leaks
 If a candidate issue is not reachable from the code shown, say so explicitly and do not report it.
 If nothing is reachable and exploitable, respond with NONE.`
-            },
-            { role: 'user', content: `Diff hunk:\n${diffHunk}\n\n${fullFileContext ? `Full file context for reachability analysis:\n${fullFileContext}` : '(No full-file context available — reason from the diff hunk alone.)'}` }
-          ]
-        }, gatewayOpts),
+                },
+                { role: 'user', content: `Diff hunk:\n${diffHunk}\n\n${fullFileContext ? `Full file context for reachability analysis:\n${fullFileContext}` : '(No full-file context available — reason from the diff hunk alone.)'}` }
+              ]
+            }, gatewayOpts)
+          : Promise.resolve(null),
 
         // Code Quality Specialist: Alibaba Qwen 2.5 Coder (Clean Syntax & Fix Generation)
-        this.env.AI.run('@cf/qwen/qwen2.5-coder-32b-instruct', {
-          messages: [
-            {
-              role: 'system',
-              content: `You are a staff software engineer performing code review following Alibaba OCR rules.
+        triage.needsQuality
+          ? this.env.AI.run('@cf/qwen/qwen2.5-coder-32b-instruct', {
+              messages: [
+                {
+                  role: 'system',
+                  content: `You are a staff software engineer performing code review following Alibaba OCR rules.
 For any issue found:
 1. State the file and line number.
 2. Explain the defect succinctly.
@@ -509,10 +629,11 @@ For any issue found:
 \`\`\`suggestion
 <replacement code>
 \`\`\``
-            },
-            { role: 'user', content: diffHunk }
-          ]
-        }, gatewayOpts)
+                },
+                { role: 'user', content: diffHunk }
+              ]
+            }, gatewayOpts)
+          : Promise.resolve(null)
       ]);
 
       // ── PILLAR 6: OWASP-ASRH-style Regression Check + Lead Arbiter Synthesis ─
@@ -524,8 +645,8 @@ For any issue found:
 - OPA-style Policy & Blast Radius: ${policyAlerts.length > 0 ? policyAlerts.join('; ') : 'Safe scope'}
 - OSV.dev Vulnerability Lookup: ${vulnerabilityFindings.length > 0 ? vulnerabilityFindings.join('; ') : 'No known vulnerabilities in changed dependencies'}
 - OpenSSF Scorecard Supply-Chain Check: ${scorecardFindings.length > 0 ? scorecardFindings.join('; ') : 'No low-scoring dependencies flagged'}
-- Security Specialist (Mantis-style reachability): ${securityReport.response}
-- Code Quality Specialist (Qwen 2.5 Coder): ${codeReport.response}
+- Security Specialist (Mantis-style reachability): ${securityReport ? securityReport.response : 'Skipped — Jev triage found no plausible security signal in this diff'}
+- Code Quality Specialist (Qwen 2.5 Coder): ${codeReport ? codeReport.response : 'Skipped — Jev triage found no substantive quality signal in this diff'}
 
 Verification Checklist:
 1. Ensure proposed fixes introduce ZERO secondary regressions or permission leaks.
@@ -548,7 +669,7 @@ Verification Checklist:
         await postPrComment(
           pr.comments_url,
           githubToken,
-          `### 🛡️ AI Review Committee (7-Pillar Security Suite)\n*Gitleaks-pattern • OSV.dev (live) • Hard-Rails Filter • OPA-inspired Policy • Mantis-style Reachability • OWASP-ASRH-style Regression • OpenSSF Scorecard (live)*\n\n${finalSynthesis.response}`
+          `### 🛡️ AI Review Committee (7-Pillar Security Suite)\n*Gitleaks-pattern • OSV.dev (live) • Hard-Rails Filter • Jev Triage Gate • OPA-inspired Policy • Mantis-style Reachability • OWASP-ASRH-style Regression • OpenSSF Scorecard (live)*\n\n${!triage.needsSecurity ? '_Security specialist skipped by Jev triage for this PR._\n\n' : ''}${!triage.needsQuality ? '_Code quality specialist skipped by Jev triage for this PR._\n\n' : ''}${finalSynthesis.response}`
         );
       } else {
         console.error(
