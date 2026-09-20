@@ -273,6 +273,14 @@ interface RawTriageAnswer {
   qualityNoul: number;
 }
 
+// AI Gateway's Unified Billing path (active once credits are loaded) wraps
+// some responses in a job-style envelope — { state: "Completed", result: {...} }
+// — instead of returning the model's result directly. Peel it off if present;
+// live-confirmed shape via `wrangler tail`, not assumed from docs.
+function unwrapGatewayResult(response: any): any {
+  return response && typeof response === 'object' && 'result' in response ? response.result : response;
+}
+
 const TRIAGE_CATEGORIES = {
   feature: 'New functionality',
   bugfix: 'Fixes broken behavior',
@@ -316,12 +324,14 @@ async function triageWithJev(
     gatewayOpts
   );
 
+  const result = unwrapGatewayResult(response);
+
   return {
-    needsSecurity: response.answers.needs_security_review.noul >= 0.5,
-    needsQuality: response.answers.needs_quality_review.noul >= 0.5,
-    category: response.answers.category.choice,
-    securityNoul: response.answers.needs_security_review.noul,
-    qualityNoul: response.answers.needs_quality_review.noul,
+    needsSecurity: result.answers.needs_security_review.noul >= 0.5,
+    needsQuality: result.answers.needs_quality_review.noul >= 0.5,
+    category: result.answers.category.choice,
+    securityNoul: result.answers.needs_security_review.noul,
+    qualityNoul: result.answers.needs_quality_review.noul,
   };
 }
 
@@ -361,7 +371,12 @@ needs_quality_review: true if a human reviewer would likely have substantive sty
     gatewayOpts
   );
 
-  const text: string = response.response ?? '';
+  const result = unwrapGatewayResult(response);
+  // Depending on routing, this comes back either as Workers AI's simple
+  // `{ response: "..." }` shape or an OpenAI-compatible chat-completions
+  // shape (`choices[0].message.content`) — live-confirmed both occur.
+  const text: string =
+    typeof result?.response === 'string' ? result.response : result?.choices?.[0]?.message?.content ?? '';
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error(`Fallback triage model did not return parseable JSON: ${text.slice(0, 200)}`);
 
