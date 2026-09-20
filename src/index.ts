@@ -254,7 +254,18 @@ function evaluateOpaPolicy(parsedFiles: parseDiff.File[]): string[] {
 // two Episode 5 bonus tracks (clawbuilders-story-agent's redaction pass,
 // web-qa-jev-agent's escalation gate): the expensive tier only runs when
 // something actually needs it.
-interface JevTriageResult {
+interface TriageResult {
+  needsSecurity: boolean;
+  needsQuality: boolean;
+  category: string;
+  securityNoul: number;
+  qualityNoul: number;
+  // Which tier actually produced this judgment — surfaced in the posted
+  // comment so a degraded run is never mistaken for a normal one.
+  source: 'jev' | 'fallback-model' | 'fail-open';
+}
+
+interface RawTriageAnswer {
   needsSecurity: boolean;
   needsQuality: boolean;
   category: string;
@@ -262,15 +273,21 @@ interface JevTriageResult {
   qualityNoul: number;
 }
 
+const TRIAGE_CATEGORIES = {
+  feature: 'New functionality',
+  bugfix: 'Fixes broken behavior',
+  refactor: 'Restructures existing code without changing behavior',
+  docs_or_config: 'Documentation, comments, or non-code config only',
+  dependency_bump: 'Only updates dependency versions',
+  test_only: 'Only adds or modifies tests',
+} as const;
+
 async function triageWithJev(
   ai: any,
   reviewableFiles: parseDiff.File[],
   diffHunk: string,
-  policyAlerts: string[],
-  vulnerabilityFindings: string[],
-  escalationFloor: number,
   gatewayOpts: any
-): Promise<JevTriageResult> {
+): Promise<RawTriageAnswer> {
   const response = await ai.run(
     'typesafe/jev',
     {
@@ -292,35 +309,123 @@ async function triageWithJev(
         category: {
           type: 'choice',
           instructions: 'What kind of change is this?',
-          criteria: {
-            feature: 'New functionality',
-            bugfix: 'Fixes broken behavior',
-            refactor: 'Restructures existing code without changing behavior',
-            docs_or_config: 'Documentation, comments, or non-code config only',
-            dependency_bump: 'Only updates dependency versions',
-            test_only: 'Only adds or modifies tests',
-          },
+          criteria: TRIAGE_CATEGORIES,
         },
       },
     },
     gatewayOpts
   );
 
-  const securityNoul = response.answers.needs_security_review.noul;
-  const qualityNoul = response.answers.needs_quality_review.noul;
+  return {
+    needsSecurity: response.answers.needs_security_review.noul >= 0.5,
+    needsQuality: response.answers.needs_quality_review.noul >= 0.5,
+    category: response.answers.category.choice,
+    securityNoul: response.answers.needs_security_review.noul,
+    qualityNoul: response.answers.needs_quality_review.noul,
+  };
+}
 
-  // Jev can only ADD scrutiny, never suppress a real deterministic finding —
-  // if OSV.dev or the policy gate already flagged something concrete, the
-  // security specialist runs regardless of what the triage call says.
-  const forcedBySignal = policyAlerts.length > 0 || vulnerabilityFindings.length > 0;
+// Free-tier fallback — Jev is a third-party model billed through AI
+// Gateway's Unified Billing (no free tier; purchased credits only,
+// separate from Workers AI's free Neurons allowance). If that call fails
+// for any reason (including "insufficient credits"), fall back to a
+// first-party model already proven to work on the free tier in this exact
+// pipeline (the Lead Arbiter below uses the same one) and ask it to
+// approximate the same yes/no/category judgment as plain JSON. Less
+// calibrated than Jev's actual probabilities, but keeps the triage gate
+// functioning without a paid dependency.
+async function triageWithFallbackModel(
+  ai: any,
+  reviewableFiles: parseDiff.File[],
+  diffHunk: string,
+  gatewayOpts: any
+): Promise<RawTriageAnswer> {
+  const response = await ai.run(
+    '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+    {
+      messages: [
+        {
+          role: 'system',
+          content: `You are a fast triage classifier for a code review pipeline. Given a diff, decide two yes/no questions and a category. Respond with ONLY a JSON object, no prose, no markdown fences, in exactly this shape:
+{"needs_security_review": true|false, "needs_quality_review": true|false, "category": "feature"|"bugfix"|"refactor"|"docs_or_config"|"dependency_bump"|"test_only"}
+
+needs_security_review: true if the diff touches logic where a real security vulnerability (injection, auth bypass, unsafe deserialization, race condition, resource leak) is plausible. false for docs-only, style-only, or test-fixture-only changes.
+needs_quality_review: true if a human reviewer would likely have substantive style/correctness feedback beyond nitpicks. false for trivial/mechanical changes (dependency bumps, generated files, pure formatting).`,
+        },
+        {
+          role: 'user',
+          content: `Files changed: ${JSON.stringify(reviewableFiles.map((f) => f.to || f.from || '').filter(Boolean))}\n\nDiff:\n${diffHunk.slice(0, 4000)}`,
+        },
+      ],
+    },
+    gatewayOpts
+  );
+
+  const text: string = response.response ?? '';
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error(`Fallback triage model did not return parseable JSON: ${text.slice(0, 200)}`);
+
+  const parsed = JSON.parse(jsonMatch[0]);
+  if (typeof parsed.needs_security_review !== 'boolean' || typeof parsed.needs_quality_review !== 'boolean') {
+    throw new Error(`Fallback triage model returned malformed JSON: ${jsonMatch[0].slice(0, 200)}`);
+  }
 
   return {
-    needsSecurity: securityNoul >= escalationFloor || forcedBySignal,
-    needsQuality: qualityNoul >= escalationFloor,
-    category: response.answers.category.choice,
-    securityNoul,
-    qualityNoul,
+    needsSecurity: parsed.needs_security_review,
+    needsQuality: parsed.needs_quality_review,
+    category: typeof parsed.category === 'string' && parsed.category in TRIAGE_CATEGORIES ? parsed.category : 'unknown',
+    securityNoul: parsed.needs_security_review ? 1 : 0,
+    qualityNoul: parsed.needs_quality_review ? 1 : 0,
   };
+}
+
+// Orchestrates the cascade: Jev (cheap, calibrated) → free-tier model
+// fallback (cheaper still, less calibrated) → fail open (run the full
+// committee) if even that errors. Never silently drops a review — the
+// previous version of this gate had no fallback at all, so any Jev-layer
+// failure (e.g. AI Gateway credits running out) meant the alarm's outer
+// catch swallowed the error and nothing ever posted to the PR.
+async function runTriage(
+  ai: any,
+  reviewableFiles: parseDiff.File[],
+  diffHunk: string,
+  policyAlerts: string[],
+  vulnerabilityFindings: string[],
+  escalationFloor: number,
+  gatewayOpts: any
+): Promise<TriageResult> {
+  // Jev can only ADD scrutiny, never suppress a real deterministic finding —
+  // if OSV.dev or the policy gate already flagged something concrete, the
+  // security specialist runs regardless of what any triage tier says.
+  const forcedBySignal = policyAlerts.length > 0 || vulnerabilityFindings.length > 0;
+
+  const finalize = (raw: RawTriageAnswer, source: TriageResult['source']): TriageResult => ({
+    needsSecurity: raw.needsSecurity || forcedBySignal,
+    needsQuality: raw.needsQuality,
+    category: raw.category,
+    securityNoul: raw.securityNoul,
+    qualityNoul: raw.qualityNoul,
+    source,
+  });
+
+  try {
+    const raw = await triageWithJev(ai, reviewableFiles, diffHunk, gatewayOpts);
+    return finalize(
+      { ...raw, needsSecurity: raw.securityNoul >= escalationFloor, needsQuality: raw.qualityNoul >= escalationFloor },
+      'jev'
+    );
+  } catch (jevErr: any) {
+    console.error('Jev triage failed, falling back to free-tier model:', jevErr?.message ?? jevErr);
+  }
+
+  try {
+    const raw = await triageWithFallbackModel(ai, reviewableFiles, diffHunk, gatewayOpts);
+    return finalize(raw, 'fallback-model');
+  } catch (fallbackErr: any) {
+    console.error('Fallback triage also failed, failing open (full committee runs):', fallbackErr?.message ?? fallbackErr);
+  }
+
+  return finalize({ needsSecurity: true, needsQuality: true, category: 'unknown', securityNoul: 1, qualityNoul: 1 }, 'fail-open');
 }
 
 // Pillar 5: Mantis-style Reachability Check — REAL context via GitHub Contents API
@@ -554,8 +659,11 @@ export class PrReviewCoordinator extends DurableObject<Env> {
       const diffHunk = JSON.stringify(reviewableFiles.slice(0, 5));
 
       // ── JEV TRIAGE GATE: which specialist(s) does this diff actually need? ──
+      // Falls back through a free-tier model, then fails open, if Jev itself
+      // is unavailable (e.g. AI Gateway credits) — see the `triage()` doc
+      // comment above for the full cascade.
       const escalationFloor = parseFloat(this.env.JEV_ESCALATION_FLOOR ?? '0.5') || 0.5;
-      const triage = await triageWithJev(
+      const triage = await runTriage(
         this.env.AI,
         reviewableFiles,
         diffHunk,
@@ -564,9 +672,15 @@ export class PrReviewCoordinator extends DurableObject<Env> {
         escalationFloor,
         gatewayOpts
       );
+      const triageSourceNote =
+        triage.source === 'fallback-model'
+          ? ' _(Jev was unavailable this run — triage fell back to a free-tier model instead.)_'
+          : triage.source === 'fail-open'
+            ? ' _(Both Jev and the free-tier fallback were unavailable — running the full committee to be safe rather than skipping.)_'
+            : '';
 
       if (!triage.needsSecurity && !triage.needsQuality) {
-        const skipSummary = `### 🛡️ AI Review Committee — Jev Triage\n\n[typesafe/jev](https://developers.cloudflare.com/ai/models/typesafe/jev/) classified this as a **${triage.category}** change with no security or code-quality signal worth a full multi-model review (security confidence ${triage.securityNoul.toFixed(2)}, quality confidence ${triage.qualityNoul.toFixed(2)}). Skipping DeepSeek-R1 + Qwen 2.5 Coder for this PR.\n\n_Deterministic checks (secret scan, OSV.dev, policy gate) already ran above and would have forced a full review automatically if any of them had found something._`;
+        const skipSummary = `### 🛡️ AI Review Committee — Jev Triage\n\n[typesafe/jev](https://developers.cloudflare.com/ai/models/typesafe/jev/) classified this as a **${triage.category}** change with no security or code-quality signal worth a full multi-model review (security confidence ${triage.securityNoul.toFixed(2)}, quality confidence ${triage.qualityNoul.toFixed(2)}). Skipping DeepSeek-R1 + Qwen 2.5 Coder for this PR.${triageSourceNote}\n\n_Deterministic checks (secret scan, OSV.dev, policy gate) already ran above and would have forced a full review automatically if any of them had found something._`;
         this.ctx.storage.sql.exec(
           'INSERT INTO reviews (commit_sha, summary) VALUES (?, ?)',
           pr.head.sha,
@@ -669,7 +783,7 @@ Verification Checklist:
         await postPrComment(
           pr.comments_url,
           githubToken,
-          `### 🛡️ AI Review Committee (7-Pillar Security Suite)\n*Gitleaks-pattern • OSV.dev (live) • Hard-Rails Filter • Jev Triage Gate • OPA-inspired Policy • Mantis-style Reachability • OWASP-ASRH-style Regression • OpenSSF Scorecard (live)*\n\n${!triage.needsSecurity ? '_Security specialist skipped by Jev triage for this PR._\n\n' : ''}${!triage.needsQuality ? '_Code quality specialist skipped by Jev triage for this PR._\n\n' : ''}${finalSynthesis.response}`
+          `### 🛡️ AI Review Committee (7-Pillar Security Suite)\n*Gitleaks-pattern • OSV.dev (live) • Hard-Rails Filter • Jev Triage Gate • OPA-inspired Policy • Mantis-style Reachability • OWASP-ASRH-style Regression • OpenSSF Scorecard (live)*\n\n${!triage.needsSecurity ? '_Security specialist skipped by Jev triage for this PR._\n\n' : ''}${!triage.needsQuality ? '_Code quality specialist skipped by Jev triage for this PR._\n\n' : ''}${triageSourceNote ? triageSourceNote.trim() + '\n\n' : ''}${finalSynthesis.response}`
         );
       } else {
         console.error(
