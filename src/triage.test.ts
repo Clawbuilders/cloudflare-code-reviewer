@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTriageState, parseEscalationFloor, readTriageAnswer, unwrapResult } from './triage.ts';
+import { buildTriageState, isInfluenceAttempt, parseEscalationFloor, readTriageAnswer, unwrapResult } from './triage.ts';
 
 // Shapes copied from live @cf/cloudflare/clef responses (2026-10-05).
 const sqli = {
@@ -73,4 +73,15 @@ test('parseEscalationFloor prefers the new variable, then the old one, then 0.5'
   assert.equal(parseEscalationFloor(undefined, '0.7'), 0.7);
   assert.equal(parseEscalationFloor('abc', undefined), 0.5);
   assert.equal(parseEscalationFloor('0', '2'), 0.5);
+});
+
+test('only a high influence score counts as an attempt, so docs that mention the reviewer do not', () => {
+  assert.equal(isInfluenceAttempt(0.98, 0.5), true);
+  assert.equal(isInfluenceAttempt(0.6, 0.5), false);
+  assert.equal(isInfluenceAttempt(0.79, 0.5), false);
+});
+
+test('a stricter escalation floor raises the influence bar with it', () => {
+  assert.equal(isInfluenceAttempt(0.85, 0.9), false);
+  assert.equal(isInfluenceAttempt(0.95, 0.9), true);
 });
