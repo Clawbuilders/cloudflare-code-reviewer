@@ -7,6 +7,7 @@ import {
   TRIAGE_CATEGORIES,
   TRIAGE_QUESTIONS,
   buildTriageState,
+  isInfluenceAttempt,
   parseEscalationFloor,
   readTriageAnswer,
   unwrapResult,
@@ -385,7 +386,7 @@ async function runTriage(
   const forcedBySignal = policyAlerts.length > 0 || vulnerabilityFindings.length > 0;
 
   const finalize = (raw: RawTriageAnswer, source: TriageResult['source']): TriageResult => {
-    const influenceAttempt = raw.influenceNoul >= escalationFloor;
+    const influenceAttempt = isInfluenceAttempt(raw.influenceNoul, escalationFloor);
     return {
       needsSecurity: raw.needsSecurity || forcedBySignal || influenceAttempt,
       needsQuality: raw.needsQuality || influenceAttempt,
@@ -399,6 +400,17 @@ async function runTriage(
 
   try {
     const raw = await triageWithClef(ai, reviewableFiles, diffHunk, escalationFloor);
+    // Scores go to the log so the thresholds can be tuned against real PR traffic (`wrangler tail`).
+    console.log(
+      JSON.stringify({
+        triage: 'clef',
+        security: raw.securityNoul,
+        quality: raw.qualityNoul,
+        influence: raw.influenceNoul,
+        category: raw.category,
+        floor: escalationFloor,
+      })
+    );
     return finalize(raw, 'clef');
   } catch (clefErr: any) {
     console.error('Clef triage failed, falling back to free-tier model:', clefErr?.message ?? clefErr);
