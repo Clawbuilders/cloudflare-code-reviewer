@@ -225,3 +225,5 @@ By default the agent calls Workers AI directly — no gateway, no caching. To tu
 
 ## 📜 License
 Apache-2.0. Built with ❤️ by [ClawBuilders](https://clawbuilder.club).
+
+<!-- triage smoke test: docs-only change, safe to close -->
